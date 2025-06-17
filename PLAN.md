@@ -417,14 +417,14 @@ Comprehensive migration plan to transform the current opencode codebase into a s
 
 **Priority: Connect Terminal UI to Core Engine with Database Foundation**
 
-### Phase 3A: Database Foundation (IMMEDIATE - NEXT)
-- [ ] **Install better-sqlite3** and configure WAL mode
-- [ ] **Create database schema** (sessions, messages, tool_executions)
-- [ ] **Build connection wrapper** with proper error handling using Result types
-- [ ] **Add migration system** for schema versioning
-- [ ] **Implement session CRUD** operations with full error handling
+### Phase 3A: Database Foundation (IMMEDIATE - NEXT) ✅ COMPLETE
+- [x] ✅ **Install better-sqlite3** and configure WAL mode
+- [x] ✅ **Create database schema** (sessions, messages, tool_executions)
+- [x] ✅ **Build connection wrapper** with proper error handling using Result types
+- [x] ✅ **Add migration system** for schema versioning
+- [x] ✅ **Implement session CRUD** operations with full error handling
 
-### Phase 3B: Tool System Integration (HIGH PRIORITY)  
+### Phase 3B: Tool System Integration (HIGH PRIORITY - NEXT)  
 - [ ] **Connect tools to database** for execution tracking
 - [ ] **Implement real tool execution** (replace simulations)
 - [ ] **Add streaming tool output** to UI with error boundaries
@@ -445,12 +445,12 @@ Comprehensive migration plan to transform the current opencode codebase into a s
 - [ ] **Add real-time status indicators** for tool execution
 - [ ] **Implement heartbeat/keepalive** mechanism
 
-## 🚀 **Why Database Foundation Next?**
+## 🚀 **Why Tool System Integration Next?**
 
-1. **Foundation for Everything**: Sessions, messages, and tool executions all need persistence
-2. **Error Handling Ready**: We have comprehensive Result types ready for database operations  
-3. **Performance Critical**: SQLite WAL mode enables concurrent reads for real-time UI
-4. **Migration Path**: Enables smooth transition from current JSON-based storage
-5. **Tool Integration**: Database schema required before real tool execution tracking
+1. **Database Ready**: We now have full persistence for tool executions and results
+2. **Error Handling Ready**: All tool operations can use Result types for safety
+3. **UI Ready**: Terminal components can display real tool output with error boundaries
+4. **Foundation Complete**: Database provides the backbone for real tool tracking
+5. **User Value**: Moving from simulations to real tool execution provides immediate value
 
 This plan ensures a systematic migration while preserving all valuable functionality and dramatically improving the codebase maintainability. 

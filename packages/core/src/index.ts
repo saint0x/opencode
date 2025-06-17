@@ -7,7 +7,9 @@ import { VERSION } from "./cmd/version.js"
 import { Log } from "./utils/log.js"
 import { AuthCommand, AuthLoginCommand } from "./cmd/auth.js"
 import { UI } from "./cmd/ui.js"
-import { getDbClient } from "./database/client.js"
+import { createDatabase, type DatabaseConfig } from "./database/client.js"
+import { join } from "path"
+import { isOk } from "@opencode/types"
 
 const cli = yargs(hideBin(process.argv))
   .scriptName("opencode")
@@ -41,12 +43,22 @@ const cli = yargs(hideBin(process.argv))
       await ensureDirectories(appInfo)
       
       // Initialize database
-      const db = getDbClient(appInfo.paths.data)
-      const dbResult = db.connect()
-      if (dbResult.success) {
-        // Database connected successfully
+      const dbConfig: DatabaseConfig = {
+        path: join(appInfo.paths.data, 'opencode.db')
+      }
+      
+      const dbResult = createDatabase(dbConfig)
+      if (isOk(dbResult)) {
+        const db = dbResult.data
+        const initResult = await db.initialize()
+        if (isOk(initResult)) {
+          // Database initialized successfully
+        } else {
+          console.error("Failed to initialize database schema:", initResult.error.message)
+          process.exit(1)
+        }
       } else {
-        console.error("Failed to initialize database:", dbResult.error.message)
+        console.error("Failed to create database:", dbResult.error.message)
         process.exit(1)
       }
       

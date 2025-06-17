@@ -1,5 +1,6 @@
 import { z, type ZodSchema } from "zod"
 import { Log } from "./log"
+import { Result, ok, err, isOk } from "@opencode/types"
 
 const log = Log.create()
 
@@ -62,13 +63,6 @@ export abstract class NamedError extends Error {
   )
 }
 
-export type Result<T, E = Error> = 
-  | { success: true; data: T }
-  | { success: false; error: E }
-
-export const ok = <T>(data: T): Result<T> => ({ success: true, data })
-export const err = <E = Error>(error: E): Result<never, E> => ({ success: false, error })
-
 export function safe<T>(fn: () => T): Result<T>
 export function safe<T>(fn: () => Promise<T>): Promise<Result<T>>
 export function safe<T>(fn: () => T | Promise<T>): Result<T> | Promise<Result<T>> {
@@ -116,7 +110,7 @@ export function schema<T>(validator: (value: unknown) => T): {
     parse: (value: unknown): Result<T> => safe(() => validator(value)),
     parseOrThrow: (value: unknown): T => {
       const result = safe(() => validator(value))
-      if (result.success) {
+      if (isOk(result)) {
         return result.data
       } else {
         throw result.error
