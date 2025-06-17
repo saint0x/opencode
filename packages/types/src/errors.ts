@@ -29,6 +29,11 @@ export enum ErrorCode {
   PROVIDER_NETWORK_ERROR = 'PROVIDER_NETWORK_ERROR',
   PROVIDER_QUOTA_EXCEEDED = 'PROVIDER_QUOTA_EXCEEDED',
   
+  // LLM API Errors
+  LLM_API_ERROR = 'LLM_API_ERROR',
+  LLM_MODEL_NOT_FOUND = 'LLM_MODEL_NOT_FOUND',
+  LLM_CONTEXT_TOO_LONG = 'LLM_CONTEXT_TOO_LONG',
+  
   // Session Errors
   SESSION_NOT_FOUND = 'SESSION_NOT_FOUND',
   SESSION_CORRUPTED = 'SESSION_CORRUPTED',
@@ -49,6 +54,7 @@ export enum ErrorCode {
   CONFIG_INVALID = 'CONFIG_INVALID',
   CONFIG_MISSING = 'CONFIG_MISSING',
   CONFIG_SCHEMA_ERROR = 'CONFIG_SCHEMA_ERROR',
+  CONFIGURATION_ERROR = 'CONFIGURATION_ERROR',
   
   // Authentication Errors
   AUTH_INVALID_CREDENTIALS = 'AUTH_INVALID_CREDENTIALS',
@@ -56,6 +62,7 @@ export enum ErrorCode {
   AUTH_PERMISSION_DENIED = 'AUTH_PERMISSION_DENIED',
   
   // General Errors
+  NOT_FOUND = 'NOT_FOUND',
   UNKNOWN_ERROR = 'UNKNOWN_ERROR',
   INTERNAL_ERROR = 'INTERNAL_ERROR',
   VALIDATION_ERROR = 'VALIDATION_ERROR',
@@ -131,6 +138,14 @@ export function fileSystemError(
   return createError(code, message, { context, recoverable: true })
 }
 
+export function systemError(
+  code: ErrorCode,
+  message: string,
+  cause?: Error
+): OpenCodeError {
+  return createError(code, message, { cause, recoverable: false })
+}
+
 // Error classification
 export function isRecoverable(error: OpenCodeError): boolean {
   return error.recoverable
@@ -172,6 +187,15 @@ export function getUserMessage(error: OpenCodeError): string {
     
     case ErrorCode.PROVIDER_RATE_LIMITED:
       return 'API rate limit exceeded. Please wait before trying again.'
+    
+    case ErrorCode.LLM_API_ERROR:
+      return 'AI service error. Please try again or switch to a different model.'
+    
+    case ErrorCode.CONFIGURATION_ERROR:
+      return 'Configuration error. Please check your settings.'
+    
+    case ErrorCode.NOT_FOUND:
+      return 'The requested resource was not found.'
     
     default:
       return error.message

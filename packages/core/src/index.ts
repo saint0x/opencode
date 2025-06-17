@@ -3,6 +3,7 @@ import { createAppInfo, ensureDirectories } from "./utils/app-context.js"
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
 import { RunCommand } from "./cmd/run.js"
+import { ServerCommand } from "./cmd/server.js"
 import { VERSION } from "./cmd/version.js"
 import { Log } from "./utils/log.js"
 import { AuthCommand, AuthLoginCommand } from "./cmd/auth.js"
@@ -10,6 +11,20 @@ import { UI } from "./cmd/ui.js"
 import { createDatabase, type DatabaseConfig } from "./database/client.js"
 import { join } from "path"
 import { isOk } from "@opencode/types"
+
+// Export system prompt functionality
+export * from "./prompts/index.js"
+
+// Export chat service
+export * from "./chat/service.js"
+
+// Export server functionality
+export * from "./server/index.js"
+
+// Export database functionality  
+export * from "./database/client.js"
+export * from "./database/migrations.js"
+export * from "./database/schema.js"
 
 const cli = yargs(hideBin(process.argv))
   .scriptName("opencode")
@@ -71,6 +86,7 @@ const cli = yargs(hideBin(process.argv))
     },
   })
   .command(RunCommand)
+  .command(ServerCommand)
   .command(AuthCommand)
   .fail((msg, err) => {
     if (

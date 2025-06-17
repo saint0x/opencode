@@ -18,6 +18,8 @@ export interface DatabaseConfig {
   readonly?: boolean
   verbose?: boolean
   timeout?: number
+  mmapSize?: number
+  cacheSize?: number
 }
 
 export interface SessionRecord {
@@ -85,7 +87,13 @@ export class OpenCodeDatabase {
       this.db.pragma('journal_mode = WAL')
       this.db.pragma('synchronous = NORMAL')
       this.db.pragma('temp_store = memory')
-      this.db.pragma('mmap_size = 268435456') // 256MB
+      
+      const mmapSizeMB = config.mmapSize || parseInt(process.env.DATABASE_MMAP_SIZE_MB || '256')
+      this.db.pragma(`mmap_size = ${mmapSizeMB * 1024 * 1024}`)
+      
+      const cacheSize = config.cacheSize || parseInt(process.env.DATABASE_CACHE_SIZE || '1000')
+      this.db.pragma(`cache_size = ${cacheSize}`)
+      
       this.db.pragma('foreign_keys = ON')
 
     } catch (error) {
