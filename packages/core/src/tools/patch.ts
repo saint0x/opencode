@@ -1,383 +1,117 @@
-import { z } from "zod"
-import * as path from "path"
-import * as fs from "fs/promises"
-import { Tool } from "./tool.js"
-import { FileTimes } from "./util/file-times.js"
-import DESCRIPTION from "./patch.txt"
-
-const PatchParams = z.object({
-  patchText: z
-    .string()
-    .describe("The full patch text that describes all changes to be made"),
-})
-
-interface Change {
-  type: "add" | "update" | "delete"
-  old_content?: string
-  new_content?: string
-}
-
-interface Commit {
-  changes: Record<string, Change>
-}
+import {
+  Tool,
+  type ToolExecutionContext,
+  type ToolExecutionResult,
+} from './registry'
+import {
+  Result,
+  ok,
+  err,
+  type OpenCodeError,
+} from '@opencode/types'
+import {
+  ToolParam,
+  createToolDefinition,
+  createToolError,
+  withToolExecution,
+  FileSystemHelpers,
+  ToolTimer,
+  createToolSuccess,
+} from './helpers'
+import { promises as fs } from 'fs'
+import path from 'path'
 
 interface PatchOperation {
-  type: "update" | "add" | "delete"
+  type: 'update' | 'add' | 'delete'
   filePath: string
-  hunks?: PatchHunk[]
   content?: string
 }
 
-interface PatchHunk {
-  contextLine: string
-  changes: PatchChange[]
-}
+export class PatchTool implements Tool {
+  definition = createToolDefinition(
+    'patch',
+    'Apply a patch to a file. This is for making multiple complex changes to a file at once.',
+    'filesystem',
+    [
+      ToolParam.content('patch', 'The patch content to apply.'),
+    ],
+    [
+      {
+        description: 'Apply a patch to `src/main.ts`.',
+        parameters: { patch: '*** Update File: src/main.ts\n@@ -1,3 +1,3 @@\n- old line\n+ new line' },
+      },
+    ]
+  )
 
-interface PatchChange {
-  type: "keep" | "remove" | "add"
-  content: string
-}
+  private parsePatch(patchText: string): PatchOperation[] {
+    const operations: PatchOperation[] = []
+    const lines = patchText.split('\n')
+    let currentOp: PatchOperation | null = null
+    let currentContent: string[] = []
 
-function identifyFilesNeeded(patchText: string): string[] {
-  const files: string[] = []
-  const lines = patchText.split("\n")
-  for (const line of lines) {
-    if (
-      line.startsWith("*** Update File:") ||
-      line.startsWith("*** Delete File:")
-    ) {
-      const filePath = line.split(":", 2)[1]?.trim()
-      if (filePath) files.push(filePath)
+    for (const line of lines) {
+        if (line.startsWith('*** ')) {
+            if (currentOp) {
+                if (currentOp.type === 'add' || currentOp.type === 'update') {
+                    currentOp.content = currentContent.join('\n')
+                }
+                operations.push(currentOp)
+                currentContent = []
+            }
+
+            const parts = line.substring(4).split(':').map(s => s.trim())
+            const type = parts[0].toLowerCase().split(' ')[0] as 'update' | 'add' | 'delete'
+            const filePath = parts[1]
+            currentOp = { type, filePath }
+        } else if (currentOp) {
+            currentContent.push(line)
+        }
     }
+
+    if (currentOp) {
+        if (currentOp.type === 'add' || currentOp.type === 'update') {
+            currentOp.content = currentContent.join('\n')
+        }
+        operations.push(currentOp)
+    }
+
+    return operations
   }
-  return files
-}
 
-function identifyFilesAdded(patchText: string): string[] {
-  const files: string[] = []
-  const lines = patchText.split("\n")
-  for (const line of lines) {
-    if (line.startsWith("*** Add File:")) {
-      const filePath = line.split(":", 2)[1]?.trim()
-      if (filePath) files.push(filePath)
-    }
-  }
-  return files
-}
-
-function textToPatch(
-  patchText: string,
-  _currentFiles: Record<string, string>,
-): [PatchOperation[], number] {
-  const operations: PatchOperation[] = []
-  const lines = patchText.split("\n")
-  let i = 0
-  let fuzz = 0
-
-  while (i < lines.length) {
-    const line = lines[i]
-    if (!line) {
-      i++
-      continue
-    }
-
-    if (line.startsWith("*** Update File:")) {
-      const filePath = line.split(":", 2)[1]?.trim()
-      if (!filePath) {
-        i++
-        continue
-      }
-
-      const hunks: PatchHunk[] = []
-      i++
-
-      while (i < lines.length) {
-        const currentLine = lines[i]
-        if (!currentLine || currentLine.startsWith("***")) {
-          break
+  async execute(
+    parameters: { patch: string },
+    context: ToolExecutionContext
+  ): Promise<Result<ToolExecutionResult, OpenCodeError>> {
+    return withToolExecution(context, async () => {
+      const timer = new ToolTimer()
+      try {
+        const operations = this.parsePatch(parameters.patch)
+        if (operations.length === 0) {
+          return createToolError('Invalid or empty patch.', {}, timer.elapsed())
         }
         
-        if (currentLine.startsWith("@@")) {
-          const contextLine = currentLine.substring(2).trim()
-          const changes: PatchChange[] = []
-          i++
-
-          while (i < lines.length) {
-            const nextLine = lines[i]
-            if (!nextLine || nextLine.startsWith("@@") || nextLine.startsWith("***")) {
-              break
-            }
-            
-            if (nextLine.startsWith(" ")) {
-              changes.push({ type: "keep", content: nextLine.substring(1) })
-            } else if (nextLine.startsWith("-")) {
-              changes.push({
-                type: "remove",
-                content: nextLine.substring(1),
-              })
-            } else if (nextLine.startsWith("+")) {
-              changes.push({ type: "add", content: nextLine.substring(1) })
-            }
-            i++
+        for (const op of operations) {
+          const safePath = FileSystemHelpers.validateWorkspacePath(op.filePath, context.workingDirectory)
+          if (!safePath.success) {
+            return createToolError(`Invalid path in patch: ${op.filePath}`, {}, timer.elapsed())
           }
 
-          hunks.push({ contextLine, changes })
-        } else {
-          i++
+          if (op.type === 'delete') {
+            await fs.unlink(safePath.data)
+          } else if (op.content !== undefined) {
+            await fs.mkdir(path.dirname(safePath.data), { recursive: true })
+            await fs.writeFile(safePath.data, op.content, 'utf-8')
+          }
         }
-      }
-
-      operations.push({ type: "update", filePath, hunks })
-    } else if (line.startsWith("*** Add File:")) {
-      const filePath = line.split(":", 2)[1]?.trim()
-      if (!filePath) {
-        i++
-        continue
-      }
-
-      let content = ""
-      i++
-
-      while (i < lines.length) {
-        const currentLine = lines[i]
-        if (!currentLine || currentLine.startsWith("***")) {
-          break
-        }
-        if (currentLine.startsWith("+")) {
-          content += currentLine.substring(1) + "\n"
-        }
-        i++
-      }
-
-      operations.push({ type: "add", filePath, content: content.slice(0, -1) })
-    } else if (line.startsWith("*** Delete File:")) {
-      const filePath = line.split(":", 2)[1]?.trim()
-      if (filePath) {
-        operations.push({ type: "delete", filePath })
-      }
-      i++
-    } else {
-      i++
-    }
-  }
-
-  return [operations, fuzz]
-}
-
-function patchToCommit(
-  operations: PatchOperation[],
-  currentFiles: Record<string, string>,
-): Commit {
-  const changes: Record<string, Change> = {}
-
-  for (const op of operations) {
-    if (op.type === "delete") {
-      changes[op.filePath] = {
-        type: "delete",
-        old_content: currentFiles[op.filePath] || "",
-      }
-    } else if (op.type === "add") {
-      changes[op.filePath] = {
-        type: "add",
-        new_content: op.content || "",
-      }
-    } else if (op.type === "update" && op.hunks) {
-      const originalContent = currentFiles[op.filePath] || ""
-      const lines = originalContent.split("\n")
-
-      for (const hunk of op.hunks) {
-        const contextIndex = lines.findIndex((line) =>
-          line.includes(hunk.contextLine),
+        
+        return createToolSuccess(
+          `Successfully applied patch affecting ${operations.length} file(s).`,
+          { fileCount: operations.length, files: operations.map(o => o.filePath) },
+          timer.elapsed()
         )
-        if (contextIndex === -1) {
-          throw new Error(`Context line not found: ${hunk.contextLine}`)
-        }
-
-        let currentIndex = contextIndex
-        for (const change of hunk.changes) {
-          if (change.type === "keep") {
-            currentIndex++
-          } else if (change.type === "remove") {
-            lines.splice(currentIndex, 1)
-          } else if (change.type === "add") {
-            lines.splice(currentIndex, 0, change.content)
-            currentIndex++
-          }
-        }
+      } catch (error: any) {
+        return createToolError(`Failed to apply patch: ${error.message}`, {}, timer.elapsed())
       }
-
-      changes[op.filePath] = {
-        type: "update",
-        old_content: originalContent,
-        new_content: lines.join("\n"),
-      }
-    }
-  }
-
-  return { changes }
-}
-
-function generateDiff(
-  oldContent: string,
-  newContent: string,
-  filePath: string,
-): [string, number, number] {
-  // Mock implementation - would need actual diff generation
-  const lines1 = oldContent.split("\n")
-  const lines2 = newContent.split("\n")
-  const additions = Math.max(0, lines2.length - lines1.length)
-  const removals = Math.max(0, lines1.length - lines2.length)
-  return [`--- ${filePath}\n+++ ${filePath}\n`, additions, removals]
-}
-
-async function applyCommit(
-  commit: Commit,
-  writeFile: (path: string, content: string) => Promise<void>,
-  deleteFile: (path: string) => Promise<void>,
-): Promise<void> {
-  for (const [filePath, change] of Object.entries(commit.changes)) {
-    if (change.type === "delete") {
-      await deleteFile(filePath)
-    } else if (change.new_content !== undefined) {
-      await writeFile(filePath, change.new_content)
-    }
+    })
   }
 }
-
-export const PatchTool = Tool.define({
-  id: "opencode.patch",
-  description: DESCRIPTION,
-  parameters: PatchParams,
-  execute: async (params, ctx) => {
-    // Identify all files needed for the patch and verify they've been read
-    const filesToRead = identifyFilesNeeded(params.patchText)
-    for (const filePath of filesToRead) {
-      let absPath = filePath
-      if (!path.isAbsolute(absPath)) {
-        absPath = path.resolve(process.cwd(), absPath)
-      }
-
-      await FileTimes.assert(ctx.sessionID, absPath)
-
-      try {
-        const stats = await fs.stat(absPath)
-        if (stats.isDirectory()) {
-          throw new Error(`path is a directory, not a file: ${absPath}`)
-        }
-      } catch (error: any) {
-        if (error.code === "ENOENT") {
-          throw new Error(`file not found: ${absPath}`)
-        }
-        throw new Error(`failed to access file: ${error.message}`)
-      }
-    }
-
-    // Check for new files to ensure they don't already exist
-    const filesToAdd = identifyFilesAdded(params.patchText)
-    for (const filePath of filesToAdd) {
-      let absPath = filePath
-      if (!path.isAbsolute(absPath)) {
-        absPath = path.resolve(process.cwd(), absPath)
-      }
-
-      try {
-        await fs.stat(absPath)
-        throw new Error(`file already exists and cannot be added: ${absPath}`)
-      } catch (error: any) {
-        if (error.code !== "ENOENT") {
-          throw new Error(`failed to check file: ${error.message}`)
-        }
-      }
-    }
-
-    // Load all required files
-    const currentFiles: Record<string, string> = {}
-    for (const filePath of filesToRead) {
-      let absPath = filePath
-      if (!path.isAbsolute(absPath)) {
-        absPath = path.resolve(process.cwd(), absPath)
-      }
-
-      try {
-        const content = await fs.readFile(absPath, "utf-8")
-        currentFiles[filePath] = content
-      } catch (error: any) {
-        throw new Error(`failed to read file ${absPath}: ${error.message}`)
-      }
-    }
-
-    // Process the patch
-    const [patch, fuzz] = textToPatch(params.patchText, currentFiles)
-    if (fuzz > 3) {
-      throw new Error(
-        `patch contains fuzzy matches (fuzz level: ${fuzz}). Please make your context lines more precise`,
-      )
-    }
-
-    // Convert patch to commit
-    const commit = patchToCommit(patch, currentFiles)
-
-    // Apply the changes to the filesystem
-    await applyCommit(
-      commit,
-      async (filePath: string, content: string) => {
-        let absPath = filePath
-        if (!path.isAbsolute(absPath)) {
-          absPath = path.resolve(process.cwd(), absPath)
-        }
-
-        // Create parent directories if needed
-        const dir = path.dirname(absPath)
-        await fs.mkdir(dir, { recursive: true })
-        await fs.writeFile(absPath, content, "utf-8")
-      },
-      async (filePath: string) => {
-        let absPath = filePath
-        if (!path.isAbsolute(absPath)) {
-          absPath = path.resolve(process.cwd(), absPath)
-        }
-        await fs.unlink(absPath)
-      },
-    )
-
-    // Calculate statistics
-    const changedFiles: string[] = []
-    let totalAdditions = 0
-    let totalRemovals = 0
-
-    for (const [filePath, change] of Object.entries(commit.changes)) {
-      let absPath = filePath
-      if (!path.isAbsolute(absPath)) {
-        absPath = path.resolve(process.cwd(), absPath)
-      }
-      changedFiles.push(absPath)
-
-      const oldContent = change.old_content || ""
-      const newContent = change.new_content || ""
-
-      // Calculate diff statistics
-      const [, additions, removals] = generateDiff(
-        oldContent,
-        newContent,
-        filePath,
-      )
-      totalAdditions += additions
-      totalRemovals += removals
-
-      FileTimes.read(ctx.sessionID, absPath)
-    }
-
-    const result = `Patch applied successfully. ${changedFiles.length} files changed, ${totalAdditions} additions, ${totalRemovals} removals`
-    const output = result
-
-    return {
-      metadata: {
-        changed: changedFiles,
-        additions: totalAdditions,
-        removals: totalRemovals,
-        title: `${filesToRead.length} files`,
-      },
-      output,
-    }
-  },
-})

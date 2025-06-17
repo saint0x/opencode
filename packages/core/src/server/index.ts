@@ -12,24 +12,27 @@ import {
   isOk,
   type OpenCodeError 
 } from '@opencode/types'
-import { OpenCodeDatabase, createDatabase, type DatabaseConfig } from '../database/client.js'
-import { ChatService, type ChatMessage, type LLMProvider } from '../chat/service.js'
+import { OpenCodeDatabase, createDatabase, type DatabaseConfig } from '../database/client'
+import { ChatService, type ChatMessage, type LLMProvider } from '../chat/service'
 import { 
   getAllSystemPrompts, 
   getSystemPrompt, 
   getSystemPromptsByCategory,
   createCustomSystemPrompt,
   type SystemPromptConfig 
-} from '../prompts/index.js'
-import { systemPromptCache } from '../prompts/cache.js'
-import { initializeTools, createToolContext, validateToolEnvironment } from '../tools/init.js'
-import type { ToolRegistry } from '../tools/registry.js'
-import { serve, type Server } from '@hono/node-server'
-import { createAnthropicProvider } from '../providers/anthropic.js'
-import { SystemPromptService } from '../prompts/service.js'
-import { WebSocketServer, WebSocket } from 'ws'
-import { realtimeNotifier } from '../realtime/notifier.js'
+} from '../prompts'
+import { systemPromptCache } from '../prompts/cache'
+import { initializeTools, createToolContext, validateToolEnvironment } from '../tools/init'
+import type { ToolRegistry } from '../tools/registry'
+import { serve } from '@hono/node-server'
+import { createAnthropicProvider } from '../providers/anthropic'
+import { realtimeNotifier } from '../realtime/notifier'
 import type { RealtimeEvent } from '@opencode/types'
+import { type Server } from 'bun'
+
+interface WebSocketData {
+  url: URL
+}
 
 export interface ServerConfig {
   port: number
@@ -46,9 +49,8 @@ export class OpenCodeServer {
   private chatService: ChatService
   private toolRegistry: ToolRegistry
   private config: ServerConfig
-  private promptService: SystemPromptService
-  private wss!: WebSocketServer
-  private subscriptions: Map<string, Set<WebSocket>> = new Map()
+  private subscriptions: Map<string, Set<any>> = new Map()
+  private server?: Server
 
   constructor(config: ServerConfig) {
     this.config = config
@@ -62,18 +64,8 @@ export class OpenCodeServer {
     this.db = dbResult.data
     
     // Initialize services
-    const toolRegistry = initializeTools(this.db)
-    this.chatService = new ChatService(this.db, toolRegistry)
-    this.promptService = new SystemPromptService()
-    
-    // Register providers
-    const anthropicProviderResult = createAnthropicProvider()
-    
-    // Validate tool environment
-    const validation = validateToolEnvironment()
-    if (!validation.valid) {
-      console.warn('Tool environment validation failed:', validation.errors)
-    }
+    this.toolRegistry = initializeTools(this.db)
+    this.chatService = new ChatService(this.db, this.toolRegistry)
     
     this.setupMiddleware()
     this.setupRoutes()
@@ -524,63 +516,65 @@ export class OpenCodeServer {
       throw new Error(`Failed to initialize database: ${initResult.error.message}`)
     }
 
-    const env = process.env.NODE_ENV || 'development'
-    const toolStats = this.toolRegistry.getExecutionStats()
-    
-    console.log(`🚀 OpenCode server starting (${env})`)
-    console.log(`📡 Port: ${this.config.port}`)
-    console.log(`📊 Database: ${this.config.database.path}`)
-    console.log(`💾 Cache enabled: ${process.env.ANTHROPIC_ENABLE_CACHE !== 'false'}`)
-    console.log(`🔧 Tools loaded: ${toolStats.totalTools} (${Object.entries(toolStats.categories).map(([cat, count]) => `${cat}: ${count}`).join(', ')})`)
-    console.log(`🌐 Health check: http://localhost:${this.config.port}/health`)
-    console.log(`📚 API endpoints: http://localhost:${this.config.port}/api/`)
-    
-    if (env === 'development') {
-      console.log(`⚙️  CORS origins: ${this.config.cors?.origin}`)
-      console.log(`🛠️  Tools endpoint: http://localhost:${this.config.port}/api/tools`)
+    // Register providers
+    const anthropicResult = createAnthropicProvider()
+    if (anthropicResult.success) {
+      this.chatService.registerProvider(anthropicResult.data)
     }
+
+    console.log(`✅ OpenCode server running on http://localhost:${this.config.port}`)
+    
+    // Connect realtime notifier to WebSocket handler
+    realtimeNotifier.on('event', this.handleRealtimeEvent.bind(this))
     
     // Start server
-    const server = await Bun.serve({
+    const self = this
+    const server = Bun.serve({
       port: this.config.port,
-      fetch: this.app.fetch.bind(this.app)
+      fetch(req, server) {
+        const url = new URL(req.url)
+        if (server.upgrade(req, { data: { url } })) {
+          return
+        }
+        return self.app.fetch(req, server)
+      },
+      websocket: {
+        open(ws: any) {
+          const sessionId = ws.data.url.searchParams.get('sessionId')
+          if (!sessionId) {
+            ws.close(1008, 'Session ID is required')
+            return
+          }
+          self.subscribe(sessionId, ws)
+        },
+        close(ws: any) {
+          const sessionId = ws.data.url.searchParams.get('sessionId')
+          if (sessionId) {
+            self.unsubscribe(sessionId, ws)
+          }
+        },
+        message(ws, message) {
+          try {
+            const data = JSON.parse(message.toString())
+            self.handleWebSocketMessage(ws, data)
+          } catch (error) {
+            console.error('WebSocket message parse error:', error)
+          }
+        },
+      },
     })
 
-    console.log(`✅ OpenCode server running on http://localhost:${server.port}`)
-
-    this.setupWebSocketServer(server)
-    
-    realtimeNotifier.on('event', this.handleRealtimeEvent.bind(this))
+    this.server = server
   }
 
-  private setupWebSocketServer(server: Server) {
-    this.wss = new WebSocketServer({ server, path: '/ws' })
-    console.log('🔌 WebSocket server initialized at /ws')
-
-    this.wss.on('connection', (ws, req) => {
-      const url = new URL(req.url!, `http://${req.headers.host}`)
-      const sessionId = url.searchParams.get('sessionId')
-
-      if (!sessionId) {
-        ws.close(1008, 'Session ID is required')
-        return
-      }
-
-      this.subscribe(sessionId, ws)
-      ws.on('close', () => this.unsubscribe(sessionId, ws))
-      ws.on('error', () => this.unsubscribe(sessionId, ws))
-    })
-  }
-
-  private subscribe(sessionId: string, ws: WebSocket) {
+  private subscribe(sessionId: string, ws: any) {
     if (!this.subscriptions.has(sessionId)) {
       this.subscriptions.set(sessionId, new Set())
     }
     this.subscriptions.get(sessionId)!.add(ws)
-    console.log(`Client subscribed to session ${sessionId}`)
   }
 
-  private unsubscribe(sessionId: string, ws: WebSocket) {
+  private unsubscribe(sessionId: string, ws: any) {
     const sessionSockets = this.subscriptions.get(sessionId)
     if (sessionSockets) {
       sessionSockets.delete(ws)
@@ -588,19 +582,87 @@ export class OpenCodeServer {
         this.subscriptions.delete(sessionId)
       }
     }
-    console.log(`Client unsubscribed from session ${sessionId}`)
+  }
+
+  private async handleWebSocketMessage(ws: any, data: any) {
+    try {
+      const sessionId = ws.data.url.searchParams.get('sessionId')
+      
+      switch (data.type) {
+        case 'chat.message.send':
+          if (!data.payload?.content) {
+            ws.send(JSON.stringify({
+              type: 'error',
+              payload: { message: 'Message content is required' }
+            }))
+            return
+          }
+          
+          // Ensure session exists - create if it doesn't
+          const sessionCheck = await this.chatService.getSession(sessionId)
+          if (!isOk(sessionCheck)) {
+            // Create new session with the specific session ID
+            const createResult = await this.chatService.createSession(
+              `Session ${new Date().toLocaleString()}`,
+              undefined, // use default system prompt
+              data.payload.provider,
+              data.payload.model,
+              sessionId // use the session ID from WebSocket URL
+            )
+            if (!isOk(createResult)) {
+              ws.send(JSON.stringify({
+                type: 'error',
+                payload: { message: 'Failed to create session' }
+              }))
+              return
+            }
+          }
+          
+          // Send message via chat service
+          const result = await this.chatService.sendMessage(
+            sessionId,
+            data.payload.content,
+            data.payload.provider,
+            data.payload.model
+          )
+          
+          if (!isOk(result)) {
+            ws.send(JSON.stringify({
+              type: 'error',
+              payload: { message: result.error.message }
+            }))
+            return
+          }
+          
+          // The chat service will emit realtime events which will be broadcast
+          break
+          
+        default:
+          console.warn('Unknown WebSocket message type:', data.type)
+          ws.send(JSON.stringify({
+            type: 'error',
+            payload: { message: `Unknown message type: ${data.type}` }
+          }))
+      }
+    } catch (error) {
+      console.error('Error handling WebSocket message:', error)
+      ws.send(JSON.stringify({
+        type: 'error',
+        payload: { message: 'Internal server error' }
+      }))
+    }
   }
 
   private handleRealtimeEvent(event: RealtimeEvent) {
-    const sessionId = (event.payload as any).sessionId
-    if (sessionId && this.subscriptions.has(sessionId)) {
+    // Broadcast to all connected clients - each client filters by their session
+    this.subscriptions.forEach((clients, sessionId) => {
       const payload = JSON.stringify(event)
-      this.subscriptions.get(sessionId)!.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
+      clients.forEach(client => {
+        if (client.readyState === 1) { // WebSocket.OPEN
           client.send(payload)
         }
       })
-    }
+    })
   }
 
   /**

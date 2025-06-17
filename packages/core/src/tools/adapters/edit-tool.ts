@@ -1,9 +1,8 @@
-import { readFileSync, writeFileSync } from 'fs'
 import {
   Tool,
-  ToolExecutionContext,
-  ToolExecutionResult,
-} from '../registry.js'
+  type ToolExecutionContext,
+  type ToolExecutionResult,
+} from '../registry'
 import {
   Result,
   ok,
@@ -13,102 +12,70 @@ import {
 import {
   ToolParam,
   createToolDefinition,
-  createToolSuccess,
   createToolError,
-  FileSystemHelpers,
-  ToolTimer,
-  extractParameters,
   withToolExecution,
-} from '../helpers.js'
+  FileSystemHelpers,
+  createToolSuccess,
+} from '../helpers'
+import { promises as fs } from 'fs'
+import { createTwoFilesPatch } from 'diff'
 
 export class EditTool implements Tool {
   definition = createToolDefinition(
     'edit',
-    'Edit a file by searching for a string and replacing it with new content.',
+    'Edit a file in the workspace by replacing a string.',
     'filesystem',
     [
-      ToolParam.filePath('path', 'The file to edit.'),
-      ToolParam.content('search', 'The exact content to find.'),
-      ToolParam.content('replace', 'The content to replace the search string with.'),
+      { name: 'path', type: 'string', description: 'The relative path to the file to edit.', required: true },
+      { name: 'from', type: 'string', description: 'The exact string to be replaced.', required: true },
+      { name: 'to', type: 'string', description: 'The string to replace it with.', required: true },
+      { name: 'all', type: 'boolean', description: 'Set to true to replace all occurrences.', required: false },
     ],
     [
       {
-        description: 'Replace "foo" with "bar" in `main.py`.',
-        parameters: {
-          path: 'main.py',
-          search: 'foo',
-          replace: 'bar',
-        },
+        description: 'Replace the first occurrence of `foo` with `bar` in `main.py`.',
+        parameters: { path: 'main.py', from: 'foo', to: 'bar' },
       },
     ]
   )
 
   async execute(
-    parameters: Record<string, any>,
+    parameters: { path: string; from: string; to: string; all?: boolean },
     context: ToolExecutionContext
   ): Promise<Result<ToolExecutionResult, OpenCodeError>> {
     return withToolExecution(context, async () => {
-      const timer = new ToolTimer()
-
-      const paramsResult = extractParameters<{
-        path: string
-        search: string
-        replace: string
-      }>(parameters, {
-        path: { type: 'string', required: true },
-        search: { type: 'string', required: true },
-        replace: { type: 'string', required: true },
-      })
-
-      if (!paramsResult.success) {
-        return createToolError(paramsResult.error.message, {}, timer.elapsed())
-      }
-
-      const { path, search, replace } = paramsResult.data
-
-      const pathResult = FileSystemHelpers.validateWorkspacePath(
-        path,
-        context.workingDirectory
-      )
-      if (!pathResult.success) {
-        return createToolError(pathResult.error.message, { path }, timer.elapsed())
-      }
-      const fullPath = pathResult.data
+      const { path, from, to, all } = parameters
+      const safePath = FileSystemHelpers.validateWorkspacePath(path, context.workingDirectory)
+      if (!safePath.success) return createToolError(safePath.error.message)
 
       try {
-        const originalContent = readFileSync(fullPath, 'utf-8')
-        if (!originalContent.includes(search)) {
-            return createToolError(
-                `Search string not found in ${path}. Edit failed.`,
-                { path, search },
-                timer.elapsed()
-            )
+        const originalContent = await fs.readFile(safePath.data, 'utf-8')
+        let newContent = ''
+
+        if (all) {
+          newContent = originalContent.replaceAll(from, to)
+        } else {
+          const index = originalContent.indexOf(from)
+          if (index === -1) {
+            return createToolError(`The 'from' string was not found in the file.`)
+          }
+          newContent = originalContent.replace(from, to)
         }
 
-        const newContent = originalContent.replace(search, replace)
-        writeFileSync(fullPath, newContent, 'utf-8')
+        if (originalContent === newContent) {
+          return createToolError(`No changes were made. Does the 'from' string exist?`)
+        }
 
-        return createToolSuccess(
-          `Successfully edited ${path}.`,
-          { file_path: path, search, replace },
-          timer.elapsed()
-        )
+        await fs.writeFile(safePath.data, newContent, 'utf-8')
+
+        const diff = createTwoFilesPatch(path, path, originalContent, newContent)
+
+        return createToolSuccess(`Successfully edited ${path}.\n\n${diff}`, { path, diff })
       } catch (error: any) {
         if (error.code === 'ENOENT') {
-            return createToolError(`File not found: ${path}`, { path }, timer.elapsed())
+          return createToolError(`File not found at path: ${path}`)
         }
-        return createToolError(
-          `Failed to edit file: ${error.message}`,
-          { path, error_code: error.code },
-          timer.elapsed()
-        )
-      }
-    }).then(result => {
-      if (result.success) {
-        return ok(result.data)
-      } else {
-        const toolExecResult = createToolError(result.error.message, result.error.context)
-        return ok(toolExecResult)
+        return createToolError(`Failed to edit file: ${error.message}`)
       }
     })
   }

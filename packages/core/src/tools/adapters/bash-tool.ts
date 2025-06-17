@@ -3,7 +3,7 @@ import {
   Tool,
   ToolExecutionContext,
   ToolExecutionResult,
-} from '../registry.js'
+} from '../registry'
 import {
   Result,
   ok,
@@ -18,7 +18,7 @@ import {
   ToolTimer,
   extractParameters,
   withToolExecution,
-} from '../helpers.js'
+} from '../helpers'
 
 export class BashTool implements Tool {
   definition = createToolDefinition(
@@ -103,13 +103,6 @@ export class BashTool implements Tool {
           }
         )
       })
-    }).then(result => {
-      if (result.success) {
-        return ok(result.data)
-      } else {
-        const toolExecResult = createToolError(result.error.message, result.error.context)
-        return ok(toolExecResult)
-      }
     })
   }
 } 

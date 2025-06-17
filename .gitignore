@@ -7,3 +7,35 @@ node_modules
 .vscode
 app.log
 gopls.log
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Lock files (optional - some prefer to track these)
+# bun.lockb
+# yarn.lock
+
+# Development files
+.env.local
+.env.development
+.env.test
+.env.production
+
+# IDE files
+*.swp
+*.swo
+*~
+
+# OS files
+Thumbs.db
+*.log
+
+# Git lock files
+.git/index.lock

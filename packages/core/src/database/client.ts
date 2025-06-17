@@ -1,5 +1,5 @@
-import Database from 'better-sqlite3'
-import { readFileSync } from 'fs'
+import { Database } from 'bun:sqlite'
+import { readFileSync, mkdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { 
@@ -40,7 +40,7 @@ export interface SessionRecord {
 export interface MessageRecord {
   id: string
   session_id: string
-  role: 'user' | 'assistant' | 'system'
+  role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
   created_at: string
   provider?: string
@@ -80,31 +80,34 @@ export interface TodoRecord {
 }
 
 export class OpenCodeDatabase {
-  private db: Database.Database
+  private db: Database
   private readonly config: DatabaseConfig
 
   constructor(config: DatabaseConfig) {
     this.config = config
     
     try {
+      // Ensure database directory exists
+      const dbDir = dirname(config.path)
+      mkdirSync(dbDir, { recursive: true })
+      
       this.db = new Database(config.path, {
         readonly: config.readonly ?? false,
-        verbose: config.verbose ? console.log : undefined,
-        timeout: config.timeout ?? 5000,
+        create: true,
       })
 
       // Configure WAL mode and performance settings
-      this.db.pragma('journal_mode = WAL')
-      this.db.pragma('synchronous = NORMAL')
-      this.db.pragma('temp_store = memory')
+      this.db.run('PRAGMA journal_mode = WAL')
+      this.db.run('PRAGMA synchronous = NORMAL')
+      this.db.run('PRAGMA temp_store = memory')
       
       const mmapSizeMB = config.mmapSize || parseInt(process.env.DATABASE_MMAP_SIZE_MB || '256')
-      this.db.pragma(`mmap_size = ${mmapSizeMB * 1024 * 1024}`)
+      this.db.run(`PRAGMA mmap_size = ${mmapSizeMB * 1024 * 1024}`)
       
       const cacheSize = config.cacheSize || parseInt(process.env.DATABASE_CACHE_SIZE || '1000')
-      this.db.pragma(`cache_size = ${cacheSize}`)
+      this.db.run(`PRAGMA cache_size = ${cacheSize}`)
       
-      this.db.pragma('foreign_keys = ON')
+      this.db.run('PRAGMA foreign_keys = ON')
 
     } catch (error) {
       throw databaseError(
@@ -120,10 +123,9 @@ export class OpenCodeDatabase {
    */
   async initialize(): Promise<Result<void, OpenCodeError>> {
     try {
-      const schemaPath = join(__dirname, 'schema.sql')
-      const schema = readFileSync(schemaPath, 'utf-8')
-      
-      this.db.exec(schema)
+      // Import and use the schema from the TypeScript file instead of reading SQL file
+      const { initializeDatabase } = await import('./schema.js')
+      initializeDatabase(this.db)
       
       return ok(undefined)
     } catch (error) {
@@ -168,10 +170,10 @@ export class OpenCodeDatabase {
       stmt.run(
         session.id,
         session.title,
-        session.parent_id,
-        session.provider,
-        session.model,
-        session.system_prompt,
+        session.parent_id || null,
+        session.provider || null,
+        session.model || null,
+        session.system_prompt || null,
         session.metadata,
         session.status
       )
@@ -302,7 +304,7 @@ export class OpenCodeDatabase {
   /**
    * Add message to session
    */
-  addMessage(message: Omit<MessageRecord, 'created_at'>): Result<void, OpenCodeError> {
+  addMessage(message: Omit<MessageRecord, 'created_at'>): Result<{ id: string }, OpenCodeError> {
     try {
       const stmt = this.db.prepare(`
         INSERT INTO messages (
@@ -316,17 +318,17 @@ export class OpenCodeDatabase {
         message.session_id,
         message.role,
         message.content,
-        message.provider,
-        message.model,
-        message.cost,
-        message.tokens_input,
-        message.tokens_output,
+        message.provider || null,
+        message.model || null,
+        message.cost || null,
+        message.tokens_input || null,
+        message.tokens_output || null,
         message.metadata,
-        message.error_code,
-        message.error_message
+        message.error_code || null,
+        message.error_message || null
       )
       
-      return ok(undefined)
+      return ok({ id: message.id })
     } catch (error) {
       return err(databaseError(
         ErrorCode.DATABASE_QUERY,
@@ -463,11 +465,11 @@ export class OpenCodeDatabase {
       
       // Get database info
       const info = {
-        walMode: this.db.pragma('journal_mode', { simple: true }),
-        foreignKeys: this.db.pragma('foreign_keys', { simple: true }),
-        pageSize: this.db.pragma('page_size', { simple: true }),
-        cacheSize: this.db.pragma('cache_size', { simple: true }),
-        mmapSize: this.db.pragma('mmap_size', { simple: true }),
+        walMode: this.db.query('PRAGMA journal_mode').get(),
+        foreignKeys: this.db.query('PRAGMA foreign_keys').get(),
+        pageSize: this.db.query('PRAGMA page_size').get(),
+        cacheSize: this.db.query('PRAGMA cache_size').get(),
+        mmapSize: this.db.query('PRAGMA mmap_size').get(),
       }
       
       return ok({
@@ -503,6 +505,10 @@ export class OpenCodeDatabase {
 // Helper function to create database instance
 export function createDatabase(config: DatabaseConfig): Result<OpenCodeDatabase, OpenCodeError> {
   try {
+    // Ensure database directory exists before creating database
+    const dbDir = dirname(config.path)
+    mkdirSync(dbDir, { recursive: true })
+    
     const db = new OpenCodeDatabase(config)
     return ok(db)
   } catch (error) {

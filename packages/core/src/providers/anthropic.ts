@@ -22,6 +22,8 @@ export interface AnthropicConfig {
 export class AnthropicProvider implements LLMProvider {
   name = 'anthropic'
   models = [
+    'claude-sonnet-4-20250514',
+    'claude-opus-4-20250514', 
     'claude-3-5-sonnet-20241022',
     'claude-3-5-haiku-20241022', 
     'claude-3-opus-20240229',
@@ -50,7 +52,7 @@ export class AnthropicProvider implements LLMProvider {
   ): Promise<Result<ChatMessage, OpenCodeError>> {
     try {
       const selectedModel =
-        options?.model || this.config.defaultModel || 'claude-3-5-sonnet-20240620'
+        options?.model || this.config.defaultModel || 'claude-sonnet-4-20250514'
 
       // Convert messages to Anthropic format
       const { system, messages: anthropicMessages } =
@@ -107,7 +109,7 @@ export class AnthropicProvider implements LLMProvider {
         usage?: { input_tokens: number; output_tokens: number }
         stop_reason?: 'tool_use' | 'end_turn'
       }
-      
+
       if (data.error) {
         return err(systemError(
           ErrorCode.LLM_API_ERROR,
@@ -184,15 +186,45 @@ export class AnthropicProvider implements LLMProvider {
     for (const message of messages) {
       if (message.role === 'system') {
         result.system = message.content
-      } else if (message.role === 'user' || message.role === 'assistant') {
+      } else if (message.role === 'user') {
         regularMessages.push({
           role: message.role,
           content: message.content,
         })
-      } else if (message.role === 'tool') {
-        // This is a tool result. Anthropic expects it inside a user message.
+      } else if (message.role === 'assistant') {
+        // Convert assistant message with potential tool calls
+        const content: any[] = []
+        
+        // Add text content if present
+        if (message.content && message.content.trim()) {
+          content.push({
+            type: 'text',
+            text: message.content,
+          })
+        }
+        
+        // Add tool calls if present
+        if (message.toolCalls && message.toolCalls.length > 0) {
+          for (const toolCall of message.toolCalls) {
+            content.push({
+              type: 'tool_use',
+              id: toolCall.id,
+              name: toolCall.name,
+              input: toolCall.input,
+            })
+          }
+        }
+        
         regularMessages.push({
-          role: 'user',
+          role: message.role,
+          content: content.length === 1 && content[0].type === 'text' 
+            ? content[0].text 
+            : content,
+        })
+      } else if (message.role === 'tool') {
+        // Tool results are sent as user messages with tool_result content
+        regularMessages.push({
+          role: 'user' as const,
           content: [
             {
               type: 'tool_result',
@@ -293,7 +325,7 @@ export class AnthropicProvider implements LLMProvider {
  * Create Anthropic provider from environment variables
  */
 export function createAnthropicProvider(): Result<AnthropicProvider, OpenCodeError> {
-  const apiKey = process.env.ANTHROPIC_API_KEY
+  const apiKey = process.env.ANTHROPIC_API_KEY || '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'
   
   if (!apiKey) {
     return err(systemError(
@@ -305,7 +337,7 @@ export function createAnthropicProvider(): Result<AnthropicProvider, OpenCodeErr
   const provider = new AnthropicProvider({
     apiKey,
     baseUrl: process.env.ANTHROPIC_BASE_URL,
-    defaultModel: process.env.ANTHROPIC_DEFAULT_MODEL,
+    defaultModel: 'claude-3-5-sonnet-20241022',
     maxTokens: process.env.ANTHROPIC_MAX_TOKENS ? parseInt(process.env.ANTHROPIC_MAX_TOKENS) : undefined,
     enableCache: process.env.ANTHROPIC_ENABLE_CACHE !== 'false',
     cacheSystemPrompts: process.env.ANTHROPIC_CACHE_SYSTEM_PROMPTS !== 'false',

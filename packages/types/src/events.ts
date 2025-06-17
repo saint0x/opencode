@@ -1,6 +1,6 @@
 import { z } from 'zod'
-import { Session, Message } from './sessions.js'
-import { ToolExecution } from './tools.js'
+import { Session, Message, MessagePropsSchema } from './sessions'
+import { ToolExecution } from './tools'
 
 export const BaseEvent = z.object({
   id: z.string(),
@@ -79,57 +79,32 @@ export const WebSocketMessage = z.object({
   data: z.unknown(),
 })
 
-export type WebSocketMessage = z.infer<typeof WebSocketMessage>
+export type WebSocketMessage = z.infer<typeof WebSocketMessage> 
 
-export type RealtimeEvent =
-  | SessionUpdateEvent
-  | MessageCreatedEvent
-  | ToolCallStartEvent
-  | ToolCallEndEvent
+export const MessageUserNewEvent = z.object({
+  type: z.literal('message.user.new'),
+  payload: MessagePropsSchema
+})
 
-export interface SessionUpdateEvent {
-  type: 'session.update'
-  payload: {
-    sessionId: string
-    title?: string
-    status?: 'active' | 'archived' | 'error'
-  }
-}
+export const MessageAssistantNewEvent = z.object({
+  type: z.literal('message.assistant.new'),
+  payload: MessagePropsSchema
+})
 
-export interface MessageCreatedEvent {
-  type: 'message.created'
-  payload: {
-    sessionId: string
-    message: {
-      id: string
-      role: 'user' | 'assistant' | 'system' | 'tool'
-      content: string
-      timestamp: string
-      toolCalls?: Array<{ id: string; name: string; input: any }>
-    }
-  }
-}
+export const ToolStatusEvent = z.object({
+  type: z.literal('tool.status'),
+  payload: z.object({
+    toolCallId: z.string(),
+    status: z.string(),
+    message: z.string().optional(),
+  })
+})
 
-export interface ToolCallStartEvent {
-  type: 'tool.start'
-  payload: {
-    sessionId: string
-    toolCallId: string
-    name: string
-    input: Record<string, any>
-  }
-}
+export const RealtimeEventSchema = z.union([
+  MessageUserNewEvent,
+  MessageAssistantNewEvent,
+  ToolStatusEvent
+  // Add other events here as they are implemented
+])
 
-export interface ToolCallEndEvent {
-  type: 'tool.end'
-  payload: {
-    sessionId: string
-    toolCallId: string
-    name: string
-    result: {
-      success: boolean
-      output: string
-      error?: string
-    }
-  }
-} 
+export type RealtimeEvent = z.infer<typeof RealtimeEventSchema> 

@@ -1,14 +1,19 @@
 import React, { useState, useCallback, useEffect } from 'react'
+import { v4 as uuidv4 } from 'uuid'
 import { Layout, StatusBar } from './components/common/layout.js'
 import { CompactHeader } from './components/common/banner.js'
 import { ChatHistory } from './components/chat/history.js'
 import { ChatInput } from './components/chat/input.js'
 import { MessageProps } from './components/chat/message.js'
+import { useWebSocket } from './client/use-websocket.js'
+import type { RealtimeEvent } from '@opencode/types'
+
+// Simple in-memory session management for the client
+let currentSessionId = uuidv4()
 
 interface AppState {
   messages: MessageProps[]
   isLoading: boolean
-  sessionId?: string
   status: string
 }
 
@@ -16,88 +21,79 @@ export function App() {
   const [state, setState] = useState<AppState>({
     messages: [],
     isLoading: false,
-    status: 'Ready'
+    status: 'Connecting...',
   })
 
-  const handleSendMessage = useCallback(async (content: string) => {
-    // Add user message
-    const userMessage: MessageProps = {
-      role: 'user',
-      content,
-      timestamp: new Date()
+  const handleRealtimeEvent = useCallback((event: RealtimeEvent) => {
+    switch (event.type) {
+      case 'message.user.new':
+      case 'message.assistant.new':
+        setState(prev => ({
+          ...prev,
+          messages: [...prev.messages, event.payload],
+          isLoading: event.type === 'message.user.new',
+          status: event.type === 'message.user.new' ? 'Assistant is thinking...' : 'Ready',
+        }))
+        break
+      case 'tool.status':
+        // TODO: Implement a more sophisticated tool status display
+        setState(prev => ({ ...prev, status: `Tool status: ${event.payload.status}` }))
+        break
     }
+  }, [])
 
-    setState(prev => ({
-      ...prev,
-      messages: [...prev.messages, userMessage],
-      isLoading: true,
-      status: 'Processing...'
-    }))
+  const { isConnected, sendMessage } = useWebSocket({
+    sessionId: currentSessionId,
+    onOpen: () => {
+      setState(prev => ({ ...prev, status: 'Connected' }))
+    },
+    onClose: () => {
+      setState(prev => ({ ...prev, status: 'Disconnected' }))
+    },
+    onError: (error) => {
+      setState(prev => ({ ...prev, status: 'Connection failed' }))
+    },
+    onMessage: handleRealtimeEvent,
+  })
 
-    try {
-      // TODO: Connect to core engine
-      // For now, simulate response
-      await new Promise(resolve => setTimeout(resolve, 1000))
-
-      const assistantMessage: MessageProps = {
-        role: 'assistant',
-        content: `I received your message: "${content}". OpenCode v2 is being rebuilt - core functionality coming soon!`,
-        timestamp: new Date(),
-        toolCalls: [
-          {
-            id: '1',
-            name: 'read',
-            status: 'success',
-            title: 'Reading project files',
-            result: 'Found 25 TypeScript files'
-          }
-        ]
+  const handleSendMessage = useCallback(
+    (content: string) => {
+      if (!isConnected) {
+        return
       }
-
+      
+      // Set loading state immediately for better UX
       setState(prev => ({
         ...prev,
-        messages: [...prev.messages, assistantMessage],
-        isLoading: false,
-        status: 'Ready'
+        isLoading: true,
+        status: 'Assistant is thinking...'
       }))
-
-    } catch (error) {
-      setState(prev => ({
-        ...prev,
-        isLoading: false,
-        status: 'Error'
-      }))
-    }
-  }, [])
-
-  useEffect(() => {
-    // Initialize session
-    setState(prev => ({
-      ...prev,
-      sessionId: generateSessionId(),
-      status: 'Connected'
-    }))
-  }, [])
+      
+      // Send message via WebSocket
+      sendMessage({
+        type: 'chat.message.send',
+        payload: {
+          sessionId: currentSessionId,
+          content,
+        },
+      })
+    },
+    [isConnected, sendMessage]
+  )
 
   return (
     <Layout
       header={<CompactHeader />}
-      footer={<StatusBar status={state.status} session={state.sessionId || undefined} />}
+      footer={<StatusBar status={state.status} session={currentSessionId} />}
     >
-      <ChatHistory 
-        messages={state.messages} 
-        isLoading={state.isLoading}
-      />
-      
-      <ChatInput 
+      <ChatHistory messages={state.messages} isLoading={state.isLoading} />
+      <ChatInput
         onSubmit={handleSendMessage}
-        disabled={state.isLoading}
-        placeholder="Ask me to help with your code..."
+        disabled={!isConnected || state.isLoading}
+        placeholder={
+          isConnected ? 'Ask me to help with your code...' : 'Connecting...'
+        }
       />
     </Layout>
   )
-}
-
-function generateSessionId(): string {
-  return Math.random().toString(36).substring(2, 15)
 } 

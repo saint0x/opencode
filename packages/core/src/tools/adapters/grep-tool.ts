@@ -1,10 +1,8 @@
-import { glob } from 'glob'
-import { readFileSync } from 'fs'
 import {
   Tool,
-  ToolExecutionContext,
-  ToolExecutionResult,
-} from '../registry.js'
+  type ToolExecutionContext,
+  type ToolExecutionResult,
+} from '../registry'
 import {
   Result,
   ok,
@@ -14,119 +12,88 @@ import {
 import {
   ToolParam,
   createToolDefinition,
-  createToolSuccess,
   createToolError,
-  FileSystemHelpers,
-  ToolTimer,
-  extractParameters,
   withToolExecution,
-} from '../helpers.js'
+  FileSystemHelpers,
+  createToolSuccess,
+} from '../helpers'
+import { spawn } from 'child_process'
 
 export class GrepTool implements Tool {
   definition = createToolDefinition(
     'grep',
-    'Search for a pattern across files in the workspace using glob patterns.',
+    'Search for a pattern across files in the workspace using ripgrep.',
     'search',
     [
-      ToolParam.content('pattern', 'The literal string or regex pattern to search for.'),
-      ToolParam.content(
-        'glob',
-        'A glob pattern specifying which files to search (e.g., "src/**/*.ts").'
-      ),
+      { name: 'pattern', type: 'string', description: 'The regex pattern to search for.', required: true },
+      { name: 'path', type: 'string', description: 'A specific file or directory to search within. Defaults to the entire workspace.', required: false },
     ],
     [
       {
-        description: 'Search for "import React" in all TypeScript files.',
-        parameters: {
-          pattern: 'import React',
-          glob: 'src/**/*.ts',
-        },
+        description: 'Search for "import React" in all files.',
+        parameters: { pattern: 'import React' },
+      },
+      {
+        description: 'Search for "useState" in the `src` directory.',
+        parameters: { pattern: 'useState', path: 'src' },
       },
     ]
   )
 
   async execute(
-    parameters: Record<string, any>,
+    parameters: { pattern: string; path?: string },
     context: ToolExecutionContext
   ): Promise<Result<ToolExecutionResult, OpenCodeError>> {
     return withToolExecution(context, async () => {
-      const timer = new ToolTimer()
+      const { pattern, path } = parameters
+      const searchPath = path
+        ? FileSystemHelpers.validateWorkspacePath(path, context.workingDirectory)
+        : ok(context.workingDirectory)
 
-      const paramsResult = extractParameters<{
-        pattern: string
-        glob: string
-      }>(parameters, {
-        pattern: { type: 'string', required: true },
-        glob: { type: 'string', required: true },
-      })
+      if (!searchPath.success) return createToolError(searchPath.error.message)
 
-      if (!paramsResult.success) {
-        return createToolError(paramsResult.error.message, {}, timer.elapsed())
-      }
+      return new Promise((resolve) => {
+        const rg = spawn('rg', ['--json', pattern, searchPath.data])
+        let outputJson = ''
+        let errorOutput = ''
 
-      const { pattern, glob: globPattern } = paramsResult.data
-
-      try {
-        const files = await glob(globPattern, {
-          cwd: context.workingDirectory,
-          nodir: true,
-          dot: true,
-          ignore: ['node_modules/**', '.git/**'],
+        rg.stdout.on('data', (data) => {
+          outputJson += data.toString()
+        })
+        rg.stderr.on('data', (data) => {
+          errorOutput += data.toString()
+        })
+        
+        rg.on('close', (code) => {
+          if (code === 0 && outputJson) {
+            const matches = outputJson
+              .trim()
+              .split('\n')
+              .map((line) => JSON.parse(line))
+              .filter((m) => m.type === 'match')
+              
+            const output = matches.map(m => `${m.data.path.text}:${m.data.line_number}: ${m.data.lines.text.trim()}`).join('\n')
+            
+            resolve(createToolSuccess(output, {
+              pattern,
+              path,
+              matches: matches.length,
+            }))
+          } else if (code === 1) {
+            resolve(createToolSuccess('No matches found.', { pattern, path, matches: 0 }))
+          } else {
+            resolve(createToolError(
+              `ripgrep exited with code ${code}: ${errorOutput || 'Unknown error'}`
+            ))
+          }
         })
 
-        if (files.length === 0) {
-          return createToolSuccess(
-            `No files found matching glob pattern: ${globPattern}`,
-            { pattern, glob: globPattern, matches: [] },
-            timer.elapsed()
+        rg.on('error', (err) => {
+          resolve(
+            createToolError(`Failed to start ripgrep. Is it installed and in your PATH? Error: ${err.message}`)
           )
-        }
-
-        const matches: Array<{ file: string; line: number; text: string }> = []
-        const searchRegex = new RegExp(pattern, 'g')
-
-        for (const file of files) {
-          const pathResult = FileSystemHelpers.validateWorkspacePath(
-            file,
-            context.workingDirectory
-          )
-          if (!pathResult.success) continue // Skip files outside workspace
-
-          const content = readFileSync(pathResult.data, 'utf-8')
-          const lines = content.split('\n')
-          for (let i = 0; i < lines.length; i++) {
-            if (lines[i].match(searchRegex)) {
-              matches.push({
-                file,
-                line: i + 1,
-                text: lines[i].trim(),
-              })
-            }
-          }
-        }
-        
-        const output = matches.map(m => `${m.file}:${m.line}: ${m.text}`).join('\n')
-        const summary = `Found ${matches.length} matches in ${files.length} files.`
-
-        return createToolSuccess(
-            `${summary}\n${output}`,
-            { pattern, glob: globPattern, match_count: matches.length, file_count: files.length, matches },
-            timer.elapsed()
-        )
-      } catch (error: any) {
-        return createToolError(
-          `Grep failed: ${error.message}`,
-          { pattern, glob: globPattern, error_code: error.code },
-          timer.elapsed()
-        )
-      }
-    }).then(result => {
-      if (result.success) {
-        return ok(result.data)
-      } else {
-        const toolExecResult = createToolError(result.error.message, result.error.context)
-        return ok(toolExecResult)
-      }
+        })
+      })
     })
   }
 } 

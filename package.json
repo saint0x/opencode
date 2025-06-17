@@ -1,24 +1,33 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "opencode",
+  "name": "opencode-v2",
   "version": "2.0.0",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.2.14",
-  "scripts": {
-    "build": "bun run --filter='*' build",
-    "dev:core": "bun run --filter='@opencode/core' dev",
-    "dev:terminal": "bun run --filter='@opencode/terminal' dev",
-    "cli": "bun run --filter='@opencode/terminal' cli",
-    "code": "bun run --filter='@opencode/terminal' code",
-    "terminal": "bun run --filter='@opencode/terminal' dev:cli",
-    "test": "bun run --filter='*' test",
-    "clean": "rm -rf packages/*/node_modules packages/*/dist .bun",
-    "install:deps": "bun install"
-  },
   "workspaces": [
     "packages/*"
   ],
+  "bin": {
+    "code": "dist/code"
+  },
+  "scripts": {
+    "start": "bun run dist/code serve",
+    "dev": "concurrently \"bun --watch packages/core/src/server/index.ts\" \"bun run dev:terminal\"",
+    "dev:core": "bun run --filter='@opencode/core' dev",
+    "dev:terminal": "bun run --filter='@opencode/terminal' dev",
+    "build": "bun run build:cli && bun run --filter='@opencode/**' build",
+    "build:cli": "rm -f dist/code && bun build packages/terminal/src/cli.tsx --compile --outfile dist/code",
+    "test": "bun run --filter='*' test",
+    "clean": "rm -rf packages/*/node_modules packages/*/dist .bun dist",
+    "install:deps": "bun install",
+    "cli": "bun run --filter='@opencode/terminal' cli"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "concurrently": "^9.1.2",
+    "dotenv": "^16.4.5"
+  },
   "devDependencies": {
     "prettier": "^3.5.0",
     "typescript": "^5.8.0"

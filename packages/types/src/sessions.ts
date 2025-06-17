@@ -62,4 +62,24 @@ export const Message = z.object({
   }),
 })
 
-export type Message = z.infer<typeof Message> 
+export type Message = z.infer<typeof Message>
+
+export const ToolCallPropsSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  status: z.enum(['pending', 'running', 'success', 'error']),
+  title: z.string(),
+  result: z.string().optional(),
+})
+
+export type ToolCallProps = z.infer<typeof ToolCallPropsSchema>
+
+export const MessagePropsSchema = z.object({
+  id: z.string(),
+  role: z.enum(['user', 'assistant']),
+  content: z.string(),
+  timestamp: z.date(),
+  toolCalls: z.array(ToolCallPropsSchema).optional(),
+})
+
+export type MessageProps = z.infer<typeof MessagePropsSchema> 

@@ -6,8 +6,8 @@ import {
   toolError,
   type OpenCodeError 
 } from '@opencode/types'
-import type { OpenCodeDatabase } from '../database/client.js'
-import { realtimeNotifier } from '../realtime/notifier.js'
+import type { OpenCodeDatabase } from '../database/client'
+import { realtimeNotifier } from '../realtime/notifier'
 
 export interface ToolParameter {
   name: string
@@ -122,12 +122,11 @@ export class ToolRegistry {
     const startTime = Date.now()
 
     realtimeNotifier.emit({
-      type: 'tool.start',
+      type: 'tool.status',
       payload: {
-        sessionId: context.sessionId!,
-        toolCallId: executionId, // Note: This ID is internal, might differ from LLM's
-        name: toolName,
-        input: parameters,
+        toolCallId: executionId,
+        status: 'running',
+        message: `Executing tool: ${toolName}`,
       },
     })
 
@@ -170,16 +169,11 @@ export class ToolRegistry {
           })
         }
         realtimeNotifier.emit({
-          type: 'tool.end',
+          type: 'tool.status',
           payload: {
-            sessionId: context.sessionId!,
             toolCallId: executionId,
-            name: toolName,
-            result: {
-              success: false,
-              output: '',
-              error: result.error.message,
-            },
+            status: 'error',
+            message: result.error.message,
           },
         })
         return result
@@ -194,15 +188,11 @@ export class ToolRegistry {
       }
 
       realtimeNotifier.emit({
-        type: 'tool.end',
+        type: 'tool.status',
         payload: {
-          sessionId: context.sessionId!,
           toolCallId: executionId,
-          name: toolName,
-          result: {
-            success: true,
-            output: result.data.output,
-          },
+          status: 'success',
+          message: result.data.output,
         },
       })
 
@@ -224,16 +214,11 @@ export class ToolRegistry {
       }
 
       realtimeNotifier.emit({
-        type: 'tool.end',
+        type: 'tool.status',
         payload: {
-          sessionId: context.sessionId!,
           toolCallId: executionId,
-          name: toolName,
-          result: {
-            success: false,
-            output: '',
-            error: error instanceof Error ? error.message : String(error),
-          },
+          status: 'error',
+          message: error instanceof Error ? error.message : String(error),
         },
       })
 

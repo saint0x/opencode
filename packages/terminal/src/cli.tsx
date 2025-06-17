@@ -1,122 +1,145 @@
 #!/usr/bin/env node
 import React from 'react'
 import { render } from 'ink'
+import { Command } from 'commander'
 import { App } from './app.js'
 import { RunMode } from './components/modes/run-mode.js'
-import { parseCliArgs, showHelp, showError } from './cli/router.js'
 import { CLIErrorBoundary } from './components/common/error-boundary.js'
-import { isOk, isErr, unwrap } from '@opencode/types'
+import { OpenCodeServer, type ServerConfig, createAppInfo, ensureDirectories } from '@opencode/core'
+import { join } from 'path'
 
-// Parse command line arguments with error handling
-const parseResult = parseCliArgs(process.argv)
+const program = new Command()
 
-if (isErr(parseResult)) {
-  showError(parseResult.error)
-  process.exit(1)
-}
+program
+  .name('code')
+  .description('The AI-powered command-line coding assistant.')
+  .version('2.0.0')
 
-const args = unwrap(parseResult)
-
-// Handle help
-if (args.help) {
-  showHelp()
-  process.exit(0)
-}
-
-// Clear the terminal for clean startup
-console.clear()
-
-// Route to appropriate mode with error boundaries
-let component: React.ReactElement
-
-try {
-  switch (args.command) {
-    case 'run':
-      // Already validated in parseCliArgs, but extra safety check
-      if (!args.message || args.message.length === 0) {
-        console.error('❌ Run command requires a message')
-        console.error('Usage: code run "your message here"')
-        process.exit(1)
-      }
-      component = (
-        <CLIErrorBoundary>
-          <RunMode 
-            message={args.message.join(' ')}
-            sessionId={args.session}
-            share={args.share}
-          />
-        </CLIErrorBoundary>
-      )
-      break
-      
-    case 'auth':
-      console.log('🔑 Authentication management coming soon...')
-      console.log('This will include:')
-      console.log('  • code auth login    - Add API credentials')
-      console.log('  • code auth logout   - Remove credentials')
-      console.log('  • code auth list     - Show configured providers')
-      process.exit(0)
-      
-    case 'upgrade':
-      console.log('⬆️  Upgrade functionality coming soon...')
-      console.log('This will automatically update OpenCode to the latest version.')
-      process.exit(0)
-      
-    case 'interactive':
-    default:
-      // Default to interactive chat mode
-      component = (
-        <CLIErrorBoundary>
-          <App />
-        </CLIErrorBoundary>
-      )
-      break
-  }
-} catch (error) {
-  console.error('❌ Failed to initialize application:', error)
-  process.exit(1)
-}
-
-// Render the selected component with global error handling
-let unmount: (() => void) | undefined
-
-try {
-  const result = render(component)
-  unmount = result.unmount
-} catch (error) {
-  console.error('❌ Failed to render application:', error)
-  process.exit(1)
-}
-
-// Handle process termination gracefully
-const cleanup = () => {
-  try {
-    if (unmount) {
-      unmount()
+program
+  .command('serve')
+  .description('Start the OpenCode backend server.')
+  .option('-p, --port <number>', 'Port to run the server on', '3000')
+  .action((options) => {
+    console.log('Starting OpenCode server...')
+    const port = parseInt(options.port, 10)
+    
+    if (isNaN(port)) {
+      console.error('Error: Port must be a number.')
+      process.exit(1)
     }
-  } catch (error) {
-    console.error('Warning: Error during cleanup:', error)
+
+    try {
+      const appInfo = createAppInfo()
+      ensureDirectories(appInfo)
+      const dbPath = join(appInfo.paths.data, 'opencode.db')
+
+      const server = new OpenCodeServer({
+        port,
+        database: {
+          path: dbPath,
+        },
+      })
+      server.start()
+    } catch (error) {
+      console.error('Failed to start server:', error)
+      process.exit(1)
+    }
+  })
+
+program
+  .command('run <message...>')
+  .description('Run a command in non-interactive mode.')
+  .option('-s, --session <id>', 'Continue an existing session')
+  .option('--share', 'Share the session URL')
+  .action((message, options) => {
+    console.clear()
+    render(
+      <CLIErrorBoundary>
+        <RunMode 
+          message={message.join(' ')}
+          sessionId={options.session}
+          share={options.share}
+        />
+      </CLIErrorBoundary>
+    )
+  })
+
+program
+  .command('auth', 'Manage authentication for AI providers.')
+  .action(() => {
+    console.log('🔑 Authentication management coming soon...')
+    console.log('  • code auth login    - Add API credentials')
+    console.log('  • code auth logout   - Remove credentials')
+    console.log('  • code auth list     - Show configured providers')
+  })
+
+program
+  .command('upgrade', 'Upgrade OpenCode to the latest version.')
+  .action(() => {
+    console.log('⬆️  Upgrade functionality coming soon...')
+  })
+
+// Default command: interactive mode with auto-server
+program
+  .action(async () => {
+    console.clear()
+    
+    // Start server in background
+    let server: OpenCodeServer | null = null
+    try {
+      const appInfo = createAppInfo()
+      ensureDirectories(appInfo)
+      const dbPath = join(appInfo.paths.data, 'opencode.db')
+
+      server = new OpenCodeServer({
+        port: 3000,
+        database: {
+          path: dbPath,
+        },
+      })
+      
+      // Start server without blocking
+      server.start().catch((error) => {
+        console.error('Server failed to start:', error)
+      })
+      
+      // Give server a moment to start
+      await new Promise(resolve => setTimeout(resolve, 1000))
+    } catch (error) {
+      console.error('Failed to initialize server:', error)
+    }
+    
+    // Start terminal UI
+    const { unmount } = render(
+      <CLIErrorBoundary>
+        <App />
+      </CLIErrorBoundary>
+    )
+    
+    // Cleanup on exit
+    const cleanup = async () => {
+      unmount()
+      if (server) {
+        await server.stop()
+      }
+      process.exit(0)
+    }
+    
+    process.on('SIGINT', cleanup)
+    process.on('SIGTERM', cleanup)
+  })
+
+
+async function main() {
+  // If no arguments, run default interactive mode
+  if (!process.argv.slice(2).length) {
+    await program.parseAsync(['node', 'code'])
+  } else {
+    await program.parseAsync(process.argv)
   }
 }
 
-process.on('SIGINT', () => {
-  cleanup()
-  process.exit(0)
-})
-
-process.on('SIGTERM', () => {
-  cleanup()
-  process.exit(0)
-})
-
-process.on('uncaughtException', (error) => {
+main().catch(error => {
   console.error('❌ Uncaught exception:', error)
-  cleanup()
   process.exit(1)
 })
-
-process.on('unhandledRejection', (reason) => {
-  console.error('❌ Unhandled rejection:', reason)
-  cleanup()
-  process.exit(1)
-}) 
