@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@opencode/terminal",
+  "version": "2.0.0",
+  "type": "module",
+  "description": "OpenCode terminal interface",
+  "bin": {
+    "code": "./dist/cli.js"
+  },
+  "main": "./dist/app.js",
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "dev": "bun run --watch src/cli.tsx",
+    "dev:cli": "bun run src/cli.tsx",
+    "start": "node dist/cli.js",
+    "start:built": "bun run dist/cli.js",
+    "cli": "bun run src/cli.tsx",
+    "code": "bun run src/cli.tsx",
+    "type-check": "tsc --noEmit",
+    "type-check:watch": "tsc --noEmit --watch",
+    "clean": "rm -rf dist",
+    "test": "bun test",
+    "lint": "tsc --noEmit"
+  },
+  "exports": {
+    ".": "./src/app.ts"
+  },
+  "dependencies": {
+    "@opencode/core": "workspace:*",
+    "@opencode/types": "workspace:*",
+    "ink": "^5.0.1",
+    "react": "^18.3.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.2"
+  }
+}

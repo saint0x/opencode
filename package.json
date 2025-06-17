@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.2.14",
+  "scripts": {
+    "build": "bun run --filter='*' build",
+    "dev:core": "bun run --filter='@opencode/core' dev",
+    "dev:terminal": "bun run --filter='@opencode/terminal' dev",
+    "cli": "bun run --filter='@opencode/terminal' cli",
+    "code": "bun run --filter='@opencode/terminal' code",
+    "terminal": "bun run --filter='@opencode/terminal' dev:cli",
+    "test": "bun run --filter='*' test",
+    "clean": "rm -rf packages/*/node_modules packages/*/dist .bun",
+    "install:deps": "bun install"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "devDependencies": {
+    "prettier": "^3.5.0",
+    "typescript": "^5.8.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sst/opencode"
+  },
+  "license": "MIT",
+  "prettier": {
+    "semi": false,
+    "singleQuote": true,
+    "trailingComma": "es5"
+  }
+}
