@@ -53,6 +53,18 @@ export const DatabaseSchema = {
     )
   `,
   
+  todos: `
+    CREATE TABLE IF NOT EXISTS todos (
+      id TEXT PRIMARY KEY,
+      session_id TEXT,
+      content TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed')),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )
+  `,
+  
   auth_credentials: `
     CREATE TABLE IF NOT EXISTS auth_credentials (
       provider_id TEXT PRIMARY KEY,
@@ -98,6 +110,8 @@ export const DatabaseSchema = {
     'CREATE INDEX IF NOT EXISTS idx_usage_metrics_timestamp ON usage_metrics(timestamp)',
     'CREATE INDEX IF NOT EXISTS idx_usage_metrics_provider ON usage_metrics(provider_id)',
     'CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at)',
+    'CREATE INDEX IF NOT EXISTS idx_todos_session_id ON todos(session_id)',
+    'CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status)',
   ],
 }
 
@@ -112,6 +126,7 @@ export function initializeDatabase(db: Database.Database) {
   db.exec(DatabaseSchema.sessions)
   db.exec(DatabaseSchema.messages)
   db.exec(DatabaseSchema.tool_executions)
+  db.exec(DatabaseSchema.todos)
   db.exec(DatabaseSchema.auth_credentials)
   db.exec(DatabaseSchema.provider_configs)
   db.exec(DatabaseSchema.usage_metrics)

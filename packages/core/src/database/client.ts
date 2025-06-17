@@ -69,6 +69,16 @@ export interface ToolExecutionRecord {
   metadata: string // JSON
 }
 
+export interface TodoRecord {
+  id: string
+  content: string
+  status: 'pending' | 'completed'
+  created_at: string
+  updated_at: string
+  session_id: string | null
+  metadata: string // JSON
+}
+
 export class OpenCodeDatabase {
   private db: Database.Database
   private readonly config: DatabaseConfig
@@ -355,6 +365,93 @@ export class OpenCodeDatabase {
       ))
     }
   }
+
+  // ===== TODO OPERATIONS =====
+
+  addTodo(
+    todo: Omit<TodoRecord, 'created_at' | 'updated_at' | 'status'>
+  ): Result<void, OpenCodeError> {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO todos (id, content, session_id, metadata)
+        VALUES (?, ?, ?, ?)
+      `)
+      stmt.run(todo.id, todo.content, todo.session_id, todo.metadata)
+      return ok(undefined)
+    } catch (error) {
+      return err(
+        databaseError(
+          ErrorCode.DATABASE_QUERY,
+          'Failed to add todo',
+          error as Error
+        )
+      )
+    }
+  }
+
+  listTodos(
+    sessionId?: string,
+    status?: 'pending' | 'completed'
+  ): Result<TodoRecord[], OpenCodeError> {
+    try {
+      let query = `SELECT * FROM todos`
+      const params: any[] = []
+      const conditions: string[] = []
+
+      if (sessionId) {
+        conditions.push(`session_id = ?`)
+        params.push(sessionId)
+      }
+      if (status) {
+        conditions.push(`status = ?`)
+        params.push(status)
+      }
+
+      if (conditions.length > 0) {
+        query += ` WHERE ${conditions.join(' AND ')}`
+      }
+
+      query += ` ORDER BY created_at DESC`
+      
+      const stmt = this.db.prepare(query)
+      const results = stmt.all(...params) as TodoRecord[]
+      return ok(results)
+    } catch (error) {
+      return err(
+        databaseError(
+          ErrorCode.DATABASE_QUERY,
+          'Failed to list todos',
+          error as Error
+        )
+      )
+    }
+  }
+
+  updateTodoStatus(
+    id: string,
+    status: 'pending' | 'completed'
+  ): Result<void, OpenCodeError> {
+    try {
+      const stmt = this.db.prepare(`
+        UPDATE todos SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+      `)
+      const result = stmt.run(status, id)
+      if (result.changes === 0) {
+        return err(databaseError(ErrorCode.NOT_FOUND, `Todo not found: ${id}`))
+      }
+      return ok(undefined)
+    } catch (error) {
+      return err(
+        databaseError(
+          ErrorCode.DATABASE_QUERY,
+          'Failed to update todo status',
+          error as Error
+        )
+      )
+    }
+  }
+
+  // ===== HEALTH CHECK =====
 
   /**
    * Health check

@@ -22,6 +22,14 @@ import {
   type SystemPromptConfig 
 } from '../prompts/index.js'
 import { systemPromptCache } from '../prompts/cache.js'
+import { initializeTools, createToolContext, validateToolEnvironment } from '../tools/init.js'
+import type { ToolRegistry } from '../tools/registry.js'
+import { serve, type Server } from '@hono/node-server'
+import { createAnthropicProvider } from '../providers/anthropic.js'
+import { SystemPromptService } from '../prompts/service.js'
+import { WebSocketServer, WebSocket } from 'ws'
+import { realtimeNotifier } from '../realtime/notifier.js'
+import type { RealtimeEvent } from '@opencode/types'
 
 export interface ServerConfig {
   port: number
@@ -36,7 +44,11 @@ export class OpenCodeServer {
   private app: Hono
   private db: OpenCodeDatabase
   private chatService: ChatService
+  private toolRegistry: ToolRegistry
   private config: ServerConfig
+  private promptService: SystemPromptService
+  private wss!: WebSocketServer
+  private subscriptions: Map<string, Set<WebSocket>> = new Map()
 
   constructor(config: ServerConfig) {
     this.config = config
@@ -49,8 +61,19 @@ export class OpenCodeServer {
     }
     this.db = dbResult.data
     
-    // Initialize chat service
-    this.chatService = new ChatService(this.db)
+    // Initialize services
+    const toolRegistry = initializeTools(this.db)
+    this.chatService = new ChatService(this.db, toolRegistry)
+    this.promptService = new SystemPromptService()
+    
+    // Register providers
+    const anthropicProviderResult = createAnthropicProvider()
+    
+    // Validate tool environment
+    const validation = validateToolEnvironment()
+    if (!validation.valid) {
+      console.warn('Tool environment validation failed:', validation.errors)
+    }
     
     this.setupMiddleware()
     this.setupRoutes()
@@ -318,16 +341,29 @@ export class OpenCodeServer {
 
     // List available tools
     tools.get('/', (c) => {
-      // TODO: Implement tool registry when tools are integrated
+      const toolDefinitions = this.toolRegistry.getToolDefinitions()
+      return c.json({ tools: toolDefinitions })
+    })
+
+    // Get tool by name with full definition
+    tools.get('/:toolName', (c) => {
+      const toolName = c.req.param('toolName')
+      const tool = this.toolRegistry.getTool(toolName)
+      
+      if (!tool) {
+        return c.json({ error: 'Tool not found' }, 404)
+      }
+      
+      return c.json({ tool: tool.definition })
+    })
+
+    // Get tools by category
+    tools.get('/category/:category', (c) => {
+      const category = c.req.param('category') as any
+      const tools = this.toolRegistry.getToolsByCategory(category)
       return c.json({ 
-        tools: [
-          { name: 'read', description: 'Read file contents' },
-          { name: 'write', description: 'Write to a file' },
-          { name: 'edit', description: 'Edit file contents' },
-          { name: 'grep', description: 'Search for patterns in files' },
-          { name: 'bash', description: 'Execute shell commands' },
-          { name: 'ls', description: 'List directory contents' },
-        ]
+        tools: tools.map(t => t.definition),
+        category 
       })
     })
 
@@ -335,7 +371,7 @@ export class OpenCodeServer {
     tools.post('/execute', async (c) => {
       try {
         const body = await c.req.json()
-        const { tool, parameters, sessionId } = body
+        const { tool, parameters, sessionId, workingDirectory } = body
         
         if (!tool || !parameters) {
           return c.json({ 
@@ -343,33 +379,47 @@ export class OpenCodeServer {
           }, 400)
         }
         
-        // TODO: Implement actual tool execution when tools are integrated
-        // For now, return a mock response
-        const mockResult = {
-          tool,
-          parameters,
-          output: `Mock output for ${tool} with parameters: ${JSON.stringify(parameters)}`,
-          success: true,
-          timestamp: new Date().toISOString()
-        }
-
-        // If sessionId provided, we could log this to the database
-        if (sessionId) {
-          // TODO: Store tool execution in database
+        // Create execution context
+        const context = createToolContext({
+          sessionId,
+          workingDirectory: workingDirectory || process.cwd()
+        })
+        
+        // Execute tool with tracking
+        const result = await this.toolRegistry.executeToolTracked(tool, parameters, context)
+        
+        if (!result.success) {
+          return this.handleServiceError(result.error, c)
         }
         
-        return c.json({ result: mockResult })
+        return c.json({ 
+          result: result.data,
+          tool_name: tool,
+          execution_context: {
+            session_id: sessionId,
+            working_directory: context.workingDirectory
+          }
+        })
       } catch (error) {
         return c.json({ error: 'Invalid JSON body' }, 400)
       }
+    })
+
+    // Get tool execution statistics
+    tools.get('/stats', (c) => {
+      const stats = this.toolRegistry.getExecutionStats()
+      return c.json({ stats })
     })
 
     // Get tool execution history for a session
     tools.get('/sessions/:sessionId/executions', async (c) => {
       const sessionId = c.req.param('sessionId')
       
-      // TODO: Implement when tool execution tracking is added to database
-      return c.json({ executions: [] })
+      // TODO: Implement when tool execution tracking is fully integrated with database
+      return c.json({ 
+        executions: [],
+        message: 'Tool execution history tracking coming soon'
+      })
     })
   }
 
@@ -475,15 +525,19 @@ export class OpenCodeServer {
     }
 
     const env = process.env.NODE_ENV || 'development'
+    const toolStats = this.toolRegistry.getExecutionStats()
+    
     console.log(`🚀 OpenCode server starting (${env})`)
     console.log(`📡 Port: ${this.config.port}`)
     console.log(`📊 Database: ${this.config.database.path}`)
     console.log(`💾 Cache enabled: ${process.env.ANTHROPIC_ENABLE_CACHE !== 'false'}`)
+    console.log(`🔧 Tools loaded: ${toolStats.totalTools} (${Object.entries(toolStats.categories).map(([cat, count]) => `${cat}: ${count}`).join(', ')})`)
     console.log(`🌐 Health check: http://localhost:${this.config.port}/health`)
-    console.log(`📚 API docs: http://localhost:${this.config.port}/api/prompts`)
+    console.log(`📚 API endpoints: http://localhost:${this.config.port}/api/`)
     
     if (env === 'development') {
       console.log(`⚙️  CORS origins: ${this.config.cors?.origin}`)
+      console.log(`🛠️  Tools endpoint: http://localhost:${this.config.port}/api/tools`)
     }
     
     // Start server
@@ -493,6 +547,60 @@ export class OpenCodeServer {
     })
 
     console.log(`✅ OpenCode server running on http://localhost:${server.port}`)
+
+    this.setupWebSocketServer(server)
+    
+    realtimeNotifier.on('event', this.handleRealtimeEvent.bind(this))
+  }
+
+  private setupWebSocketServer(server: Server) {
+    this.wss = new WebSocketServer({ server, path: '/ws' })
+    console.log('🔌 WebSocket server initialized at /ws')
+
+    this.wss.on('connection', (ws, req) => {
+      const url = new URL(req.url!, `http://${req.headers.host}`)
+      const sessionId = url.searchParams.get('sessionId')
+
+      if (!sessionId) {
+        ws.close(1008, 'Session ID is required')
+        return
+      }
+
+      this.subscribe(sessionId, ws)
+      ws.on('close', () => this.unsubscribe(sessionId, ws))
+      ws.on('error', () => this.unsubscribe(sessionId, ws))
+    })
+  }
+
+  private subscribe(sessionId: string, ws: WebSocket) {
+    if (!this.subscriptions.has(sessionId)) {
+      this.subscriptions.set(sessionId, new Set())
+    }
+    this.subscriptions.get(sessionId)!.add(ws)
+    console.log(`Client subscribed to session ${sessionId}`)
+  }
+
+  private unsubscribe(sessionId: string, ws: WebSocket) {
+    const sessionSockets = this.subscriptions.get(sessionId)
+    if (sessionSockets) {
+      sessionSockets.delete(ws)
+      if (sessionSockets.size === 0) {
+        this.subscriptions.delete(sessionId)
+      }
+    }
+    console.log(`Client unsubscribed from session ${sessionId}`)
+  }
+
+  private handleRealtimeEvent(event: RealtimeEvent) {
+    const sessionId = (event.payload as any).sessionId
+    if (sessionId && this.subscriptions.has(sessionId)) {
+      const payload = JSON.stringify(event)
+      this.subscriptions.get(sessionId)!.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(payload)
+        }
+      })
+    }
   }
 
   /**

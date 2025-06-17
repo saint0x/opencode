@@ -109,15 +109,59 @@ curl -X PUT http://localhost:3000/api/chat/sessions/session_123/prompt \
 curl http://localhost:3000/api/tools
 ```
 
-**Execute tool (mock for now):**
+**Get tool by name:**
+```bash
+curl http://localhost:3000/api/tools/read
+```
+
+**Get tools by category:**
+```bash
+curl http://localhost:3000/api/tools/category/filesystem
+```
+
+**Execute tool:**
 ```bash
 curl -X POST http://localhost:3000/api/tools/execute \
   -H "Content-Type: application/json" \
   -d '{
     "tool": "read",
     "parameters": { "path": "src/index.ts" },
-    "sessionId": "session_123"
+    "sessionId": "session_123",
+    "workingDirectory": "/path/to/workspace"
   }'
+```
+
+**Execute tool with line range:**
+```bash
+curl -X POST http://localhost:3000/api/tools/execute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tool": "read",
+    "parameters": { 
+      "path": "src/index.ts", 
+      "start_line": 10, 
+      "end_line": 20 
+    }
+  }'
+```
+
+**List directory:**
+```bash
+curl -X POST http://localhost:3000/api/tools/execute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tool": "list",
+    "parameters": { 
+      "path": "src", 
+      "recursive": true,
+      "show_hidden": false
+    }
+  }'
+```
+
+**Get tool execution statistics:**
+```bash
+curl http://localhost:3000/api/tools/stats
 ```
 
 ## Environment Variables
@@ -156,5 +200,25 @@ The server uses SQLite with WAL mode for concurrent access. Database file is sto
 Database includes:
 - Sessions with system prompt tracking
 - Messages with provider/model metadata
-- Tool execution history (when implemented)
-- Authentication credentials (encrypted) 
+- Tool execution history with performance metrics
+- Authentication credentials (encrypted)
+
+## Available Tools
+
+### Filesystem Tools
+- **read**: Read file contents with optional line ranges and size limits
+- **list**: List directory contents with recursive options and hidden file support
+
+### Tool Categories
+- `filesystem`: File and directory operations
+- `search`: Text search and pattern matching (coming soon)
+- `execution`: Command execution and shell operations (coming soon)
+- `intelligence`: Code analysis and LSP integration (coming soon)
+- `management`: Task and project management (coming soon)
+
+### Tool Security
+- **Workspace isolation**: Tools cannot access files outside the workspace directory
+- **File size limits**: Configurable via `MAX_FILE_SIZE_MB` (default: 10MB)
+- **Execution timeouts**: Configurable via `TOOL_EXECUTION_TIMEOUT_SECONDS` (default: 30s)
+- **Concurrency limits**: Configurable via `TOOL_MAX_CONCURRENT_EXECUTIONS` (default: 5)
+- **Parameter validation**: All tool parameters are validated before execution 

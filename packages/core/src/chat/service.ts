@@ -8,11 +8,23 @@ import {
 } from '@opencode/types'
 import type { OpenCodeDatabase } from '../database/client.js'
 import { getSystemPrompt, getDefaultSystemPrompt, type SystemPromptConfig } from '../prompts/index.js'
+import type { ToolDefinition } from '../tools/registry.js'
+import { ExecutionQueue } from '../tools/execution-queue.js'
+import { ContextManager } from '../sessions/context.js'
+import { realtimeNotifier } from '../realtime/notifier.js'
+
+export interface ToolCall {
+  id: string
+  name: string
+  input: Record<string, any>
+}
 
 export interface ChatMessage {
-  role: 'user' | 'assistant' | 'system'
+  role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
   timestamp?: Date
+  toolCalls?: ToolCall[]
+  toolCallId?: string
 }
 
 export interface ChatSession {
@@ -27,13 +39,28 @@ export interface ChatSession {
 export interface LLMProvider {
   name: string
   models: string[]
-  chat(messages: ChatMessage[], model?: string): Promise<Result<ChatMessage, OpenCodeError>>
+  chat(
+    messages: ChatMessage[],
+    options?: { model?: string; tools?: ToolDefinition[] }
+  ): Promise<Result<ChatMessage, OpenCodeError>>
 }
 
 export class ChatService {
   private providers: Map<string, LLMProvider> = new Map()
+  private executionQueue: ExecutionQueue
+  private contextManager: ContextManager
 
-  constructor(private db: OpenCodeDatabase) {}
+  constructor(
+    private db: OpenCodeDatabase,
+    private toolRegistry: import('../tools/registry.js').ToolRegistry
+  ) {
+    this.executionQueue = new ExecutionQueue(this.toolRegistry, {
+      maxConcurrent: 3,
+    })
+    this.contextManager = new ContextManager({
+      maxTokens: parseInt(process.env.LLM_MAX_CONTEXT_TOKENS || '4096'),
+    })
+  }
 
   /**
    * Register an LLM provider
@@ -94,7 +121,9 @@ export class ChatService {
         status: 'active'
       })
 
-      if (!createResult.success) return createResult
+      if (!createResult.success) {
+        return err(createResult.error)
+      }
 
       const session: ChatSession = {
         id: sessionId,
@@ -131,71 +160,152 @@ export class ChatService {
     model?: string
   ): Promise<Result<ChatMessage, OpenCodeError>> {
     try {
-      // Get session
+      // 1. Get session
       const sessionResult = await this.getSession(sessionId)
-      if (!sessionResult.success) return sessionResult
-
+      if (!sessionResult.success) {
+        return err(sessionResult.error)
+      }
       const session = sessionResult.data
 
-      // Add user message
+      // 2. Add user message to session and database
       const userMessage: ChatMessage = {
         role: 'user',
         content,
-        timestamp: new Date()
+        timestamp: new Date(),
       }
-
-      // Store user message in database
-      const userMessageId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      session.messages.push(userMessage)
       const addUserResult = this.db.addMessage({
-        id: userMessageId,
+        id: `msg_${Date.now()}`,
         session_id: sessionId,
         role: 'user',
         content,
-        metadata: JSON.stringify({})
+        metadata: JSON.stringify({}),
       })
-
-      if (!addUserResult.success) return addUserResult
-
-      session.messages.push(userMessage)
-
-      // Get LLM provider
-      const providerName = provider || session.provider || 'anthropic'
-      const llmProvider = this.providers.get(providerName)
-      
-      if (!llmProvider) {
-        return err(systemError(
-          ErrorCode.NOT_FOUND,
-          `LLM provider not found: ${providerName}`
-        ))
+      if (!addUserResult.success) {
+        return err(addUserResult.error)
       }
 
-      // Call LLM
-      const llmResult = await llmProvider.chat(session.messages, model || session.model)
+      // 3. Get LLM provider and tool definitions
+      const providerName = provider || session.provider || 'anthropic'
+      const llmProvider = this.providers.get(providerName)
+      if (!llmProvider) {
+        return err(
+          systemError(ErrorCode.NOT_FOUND, `LLM provider not found: ${providerName}`)
+        )
+      }
+      const allTools = this.toolRegistry.getToolDefinitions()
+      const contextMessages = this.contextManager.buildContext(session.messages)
+
+      // 4. Call LLM with tools
+      const llmResult = await llmProvider.chat(contextMessages, {
+        model: model || session.model,
+        tools: allTools,
+      })
       if (!llmResult.success) return llmResult
 
+      // 5. Add assistant message to session and database
       const assistantMessage = llmResult.data
-
-      // Store assistant message in database
-      const assistantMessageId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      session.messages.push(assistantMessage)
       const addAssistantResult = this.db.addMessage({
-        id: assistantMessageId,
+        id: `msg_${Date.now()}`,
         session_id: sessionId,
         role: 'assistant',
         content: assistantMessage.content,
-        provider: providerName,
-        model: model || session.model,
-        metadata: JSON.stringify({})
+        metadata: JSON.stringify({ toolCalls: assistantMessage.toolCalls || [] }),
+      })
+      if (!addAssistantResult.success) {
+        return err(addAssistantResult.error)
+      }
+      realtimeNotifier.emit({
+        type: 'message.created',
+        payload: {
+          sessionId,
+          message: {
+            ...assistantMessage,
+            id: 'temp-id-fixme', // The DB doesn't return the ID, needs improvement
+            timestamp: assistantMessage.timestamp!.toISOString(),
+          },
+        },
       })
 
-      if (!addAssistantResult.success) return addAssistantResult
+      // 6. Check for tool calls and queue them for execution
+      if (assistantMessage.toolCalls && assistantMessage.toolCalls.length > 0) {
+        const executionPromises = assistantMessage.toolCalls.map(toolCall =>
+          this.executionQueue.add(
+            toolCall.name,
+            toolCall.input,
+            { workingDirectory: process.cwd(), sessionId: session.id },
+            0 // priority
+          )
+        )
 
+        const executionResults = await Promise.all(executionPromises)
+
+        for (let i = 0; i < executionResults.length; i++) {
+          const executionResult = executionResults[i]
+          const toolCall = assistantMessage.toolCalls[i]
+          const resultMessage: ChatMessage = {
+            role: 'tool',
+            toolCallId: toolCall.id,
+            content: executionResult.success
+              ? executionResult.data.output
+              : `Error: ${executionResult.error.message}`,
+          }
+          session.messages.push(resultMessage)
+          this.db.addMessage({
+            id: `msg_${Date.now()}`,
+            session_id: sessionId,
+            role: 'assistant',
+            content: resultMessage.content,
+            metadata: JSON.stringify({
+              toolCallId: resultMessage.toolCallId,
+              isToolResult: true,
+            }),
+          })
+        }
+
+        // 7. Call LLM again with tool results
+        const finalContext = this.contextManager.buildContext(session.messages)
+        const finalResult = await llmProvider.chat(finalContext, {
+          model: model || session.model,
+          tools: allTools,
+        })
+        if (!finalResult.success) return finalResult
+
+        const finalAssistantMessage = finalResult.data
+        session.messages.push(finalAssistantMessage)
+        this.db.addMessage({
+          id: `msg_${Date.now()}`,
+          session_id: sessionId,
+          role: 'assistant',
+          content: finalAssistantMessage.content,
+          metadata: JSON.stringify({}),
+        })
+        realtimeNotifier.emit({
+          type: 'message.created',
+          payload: {
+            sessionId,
+            message: {
+              ...finalAssistantMessage,
+              id: 'temp-id-fixme2',
+              timestamp: finalAssistantMessage.timestamp!.toISOString(),
+            },
+          },
+        })
+
+        return ok(finalAssistantMessage)
+      }
+
+      // 8. If no tool calls, just return the first assistant message
       return ok(assistantMessage)
     } catch (error) {
-      return err(systemError(
-        ErrorCode.INTERNAL_ERROR,
-        'Failed to send message',
-        error as Error
-      ))
+      return err(
+        systemError(
+          ErrorCode.INTERNAL_ERROR,
+          'Failed to send message',
+          error as Error
+        )
+      )
     }
   }
 
@@ -206,7 +316,9 @@ export class ChatService {
     try {
       // Get session from database
       const sessionResult = this.db.getSession(sessionId)
-      if (!sessionResult.success) return sessionResult
+      if (!sessionResult.success) {
+        return err(sessionResult.error)
+      }
 
       const sessionRecord = sessionResult.data
       if (!sessionRecord) {
@@ -218,7 +330,9 @@ export class ChatService {
 
       // Get messages for session
       const messagesResult = this.db.getSessionMessages(sessionId)
-      if (!messagesResult.success) return messagesResult
+      if (!messagesResult.success) {
+        return err(messagesResult.error)
+      }
 
       // Get system prompt from session metadata
       let systemPrompt = getDefaultSystemPrompt()
@@ -307,7 +421,9 @@ export class ChatService {
   async listSessions(limit = 50, offset = 0): Promise<Result<ChatSession[], OpenCodeError>> {
     try {
       const sessionsResult = this.db.listSessions(limit, offset)
-      if (!sessionsResult.success) return sessionsResult
+      if (!sessionsResult.success) {
+        return err(sessionsResult.error)
+      }
 
       const sessions: ChatSession[] = []
 

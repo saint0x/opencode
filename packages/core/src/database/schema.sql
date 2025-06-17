@@ -155,4 +155,25 @@ VALUES (1, 'initial_schema', 'sha256:initial');
 INSERT OR IGNORE INTO config (key, value) VALUES 
 ('app_version', '"2.0.0"'),
 ('database_version', '1'),
-('created_at', '"' || datetime('now') || '"'); 
+('created_at', '"' || datetime('now') || '"');
+
+-- Todos table - for the todo tool
+CREATE TABLE IF NOT EXISTS todos (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'completed')),
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    session_id TEXT,
+    metadata JSON NOT NULL DEFAULT '{}',
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_todos_session_id ON todos(session_id);
+CREATE INDEX IF NOT EXISTS idx_todos_status ON todos(status);
+
+CREATE TRIGGER IF NOT EXISTS update_todos_timestamp
+    AFTER UPDATE ON todos
+BEGIN
+    UPDATE todos SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+END; 

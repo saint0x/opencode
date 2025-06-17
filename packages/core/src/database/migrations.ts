@@ -120,16 +120,20 @@ export class MigrationManager {
   /**
    * Check migration status
    */
-  getMigrationStatus(): Result<{
-    pending: Migration[]
-    applied: MigrationRecord[]
-    conflicts: Array<{ migration: Migration; record: MigrationRecord }>
-  }, OpenCodeError> {
+  async getMigrationStatus(): Promise<Result<{
+    pending: Migration[],
+    applied: MigrationRecord[],
+    conflicts: { migration: Migration, record: MigrationRecord }[]
+  }, OpenCodeError>> {
     const migrationsResult = this.loadMigrations()
-    if (!migrationsResult.success) return migrationsResult
+    if (!migrationsResult.success) {
+      return err(migrationsResult.error)
+    }
 
     const appliedResult = this.getAppliedMigrations()
-    if (!appliedResult.success) return appliedResult
+    if (!appliedResult.success) {
+      return err(appliedResult.error)
+    }
 
     const migrations = migrationsResult.data
     const applied = appliedResult.data
@@ -152,9 +156,11 @@ export class MigrationManager {
   /**
    * Run pending migrations
    */
-  migrate(): Result<{ applied: Migration[] }, OpenCodeError> {
-    const statusResult = this.getMigrationStatus()
-    if (!statusResult.success) return statusResult
+  async migrate(): Promise<Result<{ applied: Migration[] }, OpenCodeError>> {
+    const statusResult = await this.getMigrationStatus()
+    if (!statusResult.success) {
+      return err(statusResult.error)
+    }
 
     const { pending, conflicts } = statusResult.data
 

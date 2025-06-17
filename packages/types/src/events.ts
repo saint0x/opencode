@@ -79,4 +79,57 @@ export const WebSocketMessage = z.object({
   data: z.unknown(),
 })
 
-export type WebSocketMessage = z.infer<typeof WebSocketMessage> 
+export type WebSocketMessage = z.infer<typeof WebSocketMessage>
+
+export type RealtimeEvent =
+  | SessionUpdateEvent
+  | MessageCreatedEvent
+  | ToolCallStartEvent
+  | ToolCallEndEvent
+
+export interface SessionUpdateEvent {
+  type: 'session.update'
+  payload: {
+    sessionId: string
+    title?: string
+    status?: 'active' | 'archived' | 'error'
+  }
+}
+
+export interface MessageCreatedEvent {
+  type: 'message.created'
+  payload: {
+    sessionId: string
+    message: {
+      id: string
+      role: 'user' | 'assistant' | 'system' | 'tool'
+      content: string
+      timestamp: string
+      toolCalls?: Array<{ id: string; name: string; input: any }>
+    }
+  }
+}
+
+export interface ToolCallStartEvent {
+  type: 'tool.start'
+  payload: {
+    sessionId: string
+    toolCallId: string
+    name: string
+    input: Record<string, any>
+  }
+}
+
+export interface ToolCallEndEvent {
+  type: 'tool.end'
+  payload: {
+    sessionId: string
+    toolCallId: string
+    name: string
+    result: {
+      success: boolean
+      output: string
+      error?: string
+    }
+  }
+} 

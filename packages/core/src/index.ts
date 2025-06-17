@@ -21,6 +21,20 @@ export * from "./chat/service.js"
 // Export server functionality
 export * from "./server/index.js"
 
+// Export tool system
+export * from "./tools/registry.js"
+export * from "./tools/init.js"
+export * from "./tools/helpers.js"
+export * from "./tools/composition.js"
+export * from "./tools/execution-queue.js"
+export * from "./tools/adapters/read-tool.js"
+export * from "./tools/adapters/list-tool.js"
+export * from "./tools/adapters/write-tool.js"
+export * from "./tools/adapters/edit-tool.js"
+export * from "./tools/adapters/grep-tool.js"
+export * from "./tools/adapters/bash-tool.js"
+export * from "./tools/adapters/todo-tool.js"
+
 // Export database functionality  
 export * from "./database/client.js"
 export * from "./database/migrations.js"

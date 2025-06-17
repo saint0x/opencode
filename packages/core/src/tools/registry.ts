@@ -7,6 +7,7 @@ import {
   type OpenCodeError 
 } from '@opencode/types'
 import type { OpenCodeDatabase } from '../database/client.js'
+import { realtimeNotifier } from '../realtime/notifier.js'
 
 export interface ToolParameter {
   name: string
@@ -113,20 +114,32 @@ export class ToolRegistry {
 
     // Validate parameters
     const validationResult = this.validateParameters(tool.definition, parameters)
-    if (!validationResult.success) return validationResult
+    if (!validationResult.success) {
+      return err(validationResult.error)
+    }
 
     const executionId = `exec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
     const startTime = Date.now()
 
+    realtimeNotifier.emit({
+      type: 'tool.start',
+      payload: {
+        sessionId: context.sessionId!,
+        toolCallId: executionId, // Note: This ID is internal, might differ from LLM's
+        name: toolName,
+        input: parameters,
+      },
+    })
+
     // Store execution start in database if available
     if (this.db && context.sessionId) {
-      // Create a placeholder message for the tool execution
+      // Create a message for the tool execution
       const messageId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
       const addMessageResult = this.db.addMessage({
         id: messageId,
         session_id: context.sessionId,
         role: 'system',
-        content: `Executing tool: ${toolName}`,
+        content: `Using tool: ${toolName}`,
         metadata: JSON.stringify({
           tool_execution_id: executionId,
           tool_name: toolName,
@@ -156,6 +169,19 @@ export class ToolRegistry {
             timestamp: new Date().toISOString()
           })
         }
+        realtimeNotifier.emit({
+          type: 'tool.end',
+          payload: {
+            sessionId: context.sessionId!,
+            toolCallId: executionId,
+            name: toolName,
+            result: {
+              success: false,
+              output: '',
+              error: result.error.message,
+            },
+          },
+        })
         return result
       }
 
@@ -166,6 +192,19 @@ export class ToolRegistry {
       if (this.db && context.sessionId) {
         await this.logToolExecution(executionId, toolName, parameters, context, result.data)
       }
+
+      realtimeNotifier.emit({
+        type: 'tool.end',
+        payload: {
+          sessionId: context.sessionId!,
+          toolCallId: executionId,
+          name: toolName,
+          result: {
+            success: true,
+            output: result.data.output,
+          },
+        },
+      })
 
       return result
     } catch (error) {
@@ -183,6 +222,20 @@ export class ToolRegistry {
       if (this.db && context.sessionId) {
         await this.logToolExecution(executionId, toolName, parameters, context, errorResult)
       }
+
+      realtimeNotifier.emit({
+        type: 'tool.end',
+        payload: {
+          sessionId: context.sessionId!,
+          toolCallId: executionId,
+          name: toolName,
+          result: {
+            success: false,
+            output: '',
+            error: error instanceof Error ? error.message : String(error),
+          },
+        },
+      })
 
       return err(toolError(
         ErrorCode.TOOL_EXECUTION_FAILED,

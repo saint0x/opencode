@@ -6,7 +6,8 @@ import {
   systemError,
   type OpenCodeError 
 } from '@opencode/types'
-import type { LLMProvider, ChatMessage } from '../chat/service.js'
+import type { LLMProvider, ChatMessage, ToolCall } from '../chat/service.js'
+import type { ToolDefinition } from '../tools/registry.js'
 
 export interface AnthropicConfig {
   apiKey: string
@@ -43,27 +44,29 @@ export class AnthropicProvider implements LLMProvider {
     this.baseUrl = config.baseUrl || 'https://api.anthropic.com'
   }
 
-  async chat(messages: ChatMessage[], model?: string): Promise<Result<ChatMessage, OpenCodeError>> {
+  async chat(
+    messages: ChatMessage[],
+    options?: { model?: string; tools?: ToolDefinition[] }
+  ): Promise<Result<ChatMessage, OpenCodeError>> {
     try {
-      const selectedModel = model || this.config.defaultModel || 'claude-3-5-sonnet-20241022'
+      const selectedModel =
+        options?.model || this.config.defaultModel || 'claude-3-5-sonnet-20240620'
 
-      // Check local cache for identical system prompt
-      const systemPromptHash = this.getSystemPromptHash(messages)
-      if (systemPromptHash && this.config.cacheSystemPrompts) {
-        const cached = this.systemPromptCache.get(systemPromptHash)
-        if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
-          // Use cached system prompt indicator for Anthropic's cache
-        }
+      // Convert messages to Anthropic format
+      const { system, messages: anthropicMessages } =
+        this.convertMessagesToAnthropicFormat(messages)
+
+      const requestBody: Record<string, any> = {
+        model: selectedModel,
+        max_tokens:
+          this.config.maxTokens ||
+          parseInt(process.env.ANTHROPIC_MAX_TOKENS || '4096'),
+        messages: anthropicMessages,
+        ...(system && { system }),
       }
 
-      // Convert messages to Anthropic format with caching
-      const anthropicMessages = this.convertMessagesWithCache(messages)
-      
-      const requestBody = {
-        model: selectedModel,
-        max_tokens: this.config.maxTokens || parseInt(process.env.ANTHROPIC_MAX_TOKENS || '4096'),
-        messages: anthropicMessages.messages,
-        ...(anthropicMessages.system && { system: anthropicMessages.system })
+      if (options?.tools && options.tools.length > 0) {
+        requestBody.tools = this.convertToolsToAnthropicFormat(options.tools)
       }
 
       const headers: Record<string, string> = {
@@ -92,7 +95,18 @@ export class AnthropicProvider implements LLMProvider {
         ))
       }
 
-      const data = await response.json()
+      const data = (await response.json()) as {
+        error?: { message: string; type?: string }
+        content?: Array<{
+          type: 'text' | 'tool_use'
+          text?: string
+          id?: string
+          name?: string
+          input?: Record<string, any>
+        }>
+        usage?: { input_tokens: number; output_tokens: number }
+        stop_reason?: 'tool_use' | 'end_turn'
+      }
       
       if (data.error) {
         return err(systemError(
@@ -102,24 +116,39 @@ export class AnthropicProvider implements LLMProvider {
         ))
       }
 
-      // Extract content from response
-      const content = data.content?.[0]?.text || data.content || 'No response content'
-      
-      // Cache system prompt if successful and caching is enabled
-      if (systemPromptHash && this.config.cacheSystemPrompts) {
-        const systemMessage = messages.find(m => m.role === 'system')
-        if (systemMessage) {
-          this.systemPromptCache.set(systemPromptHash, {
-            content: systemMessage.content,
-            timestamp: Date.now()
-          })
-        }
-      }
-      
       const assistantMessage: ChatMessage = {
         role: 'assistant',
-        content,
-        timestamp: new Date()
+        content: '', // Will be populated below
+        timestamp: new Date(),
+      }
+
+      const textParts: string[] = []
+      const toolCalls: ToolCall[] = []
+
+      if (data.content) {
+        for (const part of data.content) {
+          if (part.type === 'text' && part.text) {
+            textParts.push(part.text)
+          } else if (
+            part.type === 'tool_use' &&
+            part.id &&
+            part.name &&
+            part.input
+          ) {
+            toolCalls.push({
+              id: part.id,
+              name: part.name,
+              input: part.input,
+            })
+          }
+        }
+      }
+
+      assistantMessage.content =
+        textParts.join('\n').trim() ||
+        (toolCalls.length > 0 ? 'Using tools...' : 'No response content')
+      if (toolCalls.length > 0) {
+        assistantMessage.toolCalls = toolCalls
       }
 
       return ok(assistantMessage)
@@ -132,39 +161,77 @@ export class AnthropicProvider implements LLMProvider {
     }
   }
 
-  private convertMessagesWithCache(messages: ChatMessage[]): {
-    system?: string | Array<{ type: string, text: string, cache_control?: { type: string } }>
-    messages: Array<{ role: 'user' | 'assistant', content: string }>
+  private convertMessagesToAnthropicFormat(messages: ChatMessage[]): {
+    system?:
+      | string
+      | Array<{ type: string; text: string; cache_control?: { type: 'ephemeral' } }>
+    messages: Array<{
+      role: 'user' | 'assistant'
+      content: any // Can be string or array of parts
+    }>
   } {
     const result: {
-      system?: string | Array<{ type: string, text: string, cache_control?: { type: string } }>
-      messages: Array<{ role: 'user' | 'assistant', content: string }>
+      system?:
+        | string
+        | Array<{ type: string; text: string; cache_control?: { type: 'ephemeral' } }>
+      messages: Array<{ role: 'user' | 'assistant'; content: any }>
     } = {
-      messages: []
+      messages: [],
     }
+
+    const regularMessages = []
 
     for (const message of messages) {
       if (message.role === 'system') {
-        // For caching, use the array format with cache_control
-        if (this.config.enableCache && this.config.cacheSystemPrompts) {
-          result.system = [{
-            type: 'text',
-            text: message.content,
-            cache_control: { type: 'ephemeral' }
-          }]
-        } else {
-          // Use simple string format when caching is disabled
-          result.system = message.content
-        }
+        result.system = message.content
       } else if (message.role === 'user' || message.role === 'assistant') {
-        result.messages.push({
+        regularMessages.push({
           role: message.role,
-          content: message.content
+          content: message.content,
+        })
+      } else if (message.role === 'tool') {
+        // This is a tool result. Anthropic expects it inside a user message.
+        regularMessages.push({
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: message.toolCallId,
+              content: message.content,
+            },
+          ],
         })
       }
     }
 
+    result.messages = regularMessages
     return result
+  }
+
+  private convertToolsToAnthropicFormat(tools: ToolDefinition[]) {
+    return tools.map(tool => {
+      const properties: Record<string, any> = {}
+      const required: string[] = []
+      for (const param of tool.parameters) {
+        properties[param.name] = {
+          type: param.type,
+          description: param.description,
+        }
+        if (param.required) {
+          required.push(param.name)
+        }
+      }
+
+      return {
+        name: tool.name,
+        description: tool.description,
+        input_schema: {
+          type: 'object',
+          properties,
+          ...(required.length > 0 && { required }),
+        },
+      }
+    })
   }
 
   private getSystemPromptHash(messages: ChatMessage[]): string | null {
